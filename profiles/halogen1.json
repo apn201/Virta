@@ -1,0 +1,40 @@
+{
+  "id": "halogen1",
+  "display_name": "Halogen 1",
+  "tier": 1,
+  "shiftable": false,
+  "signature": {
+    "type": "step",
+    "phase": "C",
+    "step_w": 265,
+    "step_tolerance_w": 35,
+    "cycling": null
+  },
+  "measured": {
+    "on": "07:25:02 +271 W on C",
+    "off": "07:28:06 -257 W on C",
+    "source": "builder test run, Wed 16.09.2026 morning; steps measured on burst-collapsed 3EM readings"
+  },
+  "context_factors": [
+    {
+      "factor": "time_of_day",
+      "typical": [
+        "morning",
+        "evening"
+      ],
+      "strength": "medium"
+    },
+    {
+      "factor": "correlates_with",
+      "devices": [
+        "kettle",
+        "toaster",
+        "coffee_maker"
+      ],
+      "note": "kitchen cluster",
+      "strength": "medium",
+      "stronger_when": "dark"
+    }
+  ],
+  "notes": "Same phase as halogen2 and only ~70 W apart - tolerance kept tight so the two don't overlap."
+}

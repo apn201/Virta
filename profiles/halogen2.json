@@ -1,0 +1,40 @@
+{
+  "id": "halogen2",
+  "display_name": "Halogen 2 (big bang)",
+  "tier": 1,
+  "shiftable": false,
+  "signature": {
+    "type": "step",
+    "phase": "C",
+    "step_w": 193,
+    "step_tolerance_w": 35,
+    "cycling": null
+  },
+  "measured": {
+    "on": "07:29:07 +197 W on C",
+    "off": "07:31:02 -188 W on C",
+    "source": "builder test run, Wed 16.09.2026 morning; steps measured on burst-collapsed 3EM readings"
+  },
+  "context_factors": [
+    {
+      "factor": "time_of_day",
+      "typical": [
+        "morning",
+        "evening"
+      ],
+      "strength": "medium"
+    },
+    {
+      "factor": "correlates_with",
+      "devices": [
+        "kettle",
+        "toaster",
+        "coffee_maker"
+      ],
+      "note": "kitchen cluster",
+      "strength": "medium",
+      "stronger_when": "dark"
+    }
+  ],
+  "notes": "Spec seed said ~260 W; measured ~195 W. Both halogens together would be ~465 W on C."
+}

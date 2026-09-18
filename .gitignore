@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+var/
+
+# Raw household power data never leaves the house (spec 11) - keep it out of the public repo.
+csv/
+data/
+
+# worklist backup written by the labelling pass
+labels/*.bak

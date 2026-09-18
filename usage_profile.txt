@@ -1,0 +1,8 @@
+# Usage patterns (spec 3.4) - read by Nemotron as plain sentences, every advice call.
+# STARTER TEXT from the spec's example - rewrite it with your real habits.
+# Lines starting with # are ignored.
+EV must be charged by 07:00 on weekdays; it usually charges overnight.
+Sauna usually 20:00-22:00.
+Ovens are used at dinner time.
+Floor heating is comfort - deferrable within reason, not when it is cold.
+Kettle, toaster and lights are never worth deferring.

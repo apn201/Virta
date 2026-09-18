@@ -1,0 +1,42 @@
+{
+  "id": "ev_charger",
+  "display_name": "EV charger (Eve)",
+  "tier": 1,
+  "shiftable": true,
+  "signature": {
+    "type": "balanced_3phase",
+    "phase": "ABC",
+    "step_w": 10300,
+    "step_tolerance_w": 2500,
+    "per_phase_step_w": 3450,
+    "per_phase_tolerance_w": 800,
+    "cycling": null
+  },
+  "measured": {
+    "on": "08:50:59 +934/+910/+934 W, then 2 s later +2477/+2493/+2538 W (two-stage ramp)",
+    "off": "10:42:26 -3378/-3371/-3438 W, single step",
+    "mean_total_w": 11500,
+    "source": "builder test run, Wed 16.09.2026 morning; steps measured on burst-collapsed 3EM readings"
+  },
+  "load_control": {
+    "has_load_control": true,
+    "telemetry": "none - detect by signature only",
+    "others_unreliable_while_active": true,
+    "note": "Throttles itself when household load rises. While charging, flag every other detection unreliable."
+  },
+  "context_factors": [
+    {
+      "factor": "deadline",
+      "note": "must be charged by 07:00",
+      "strength": "strong"
+    },
+    {
+      "factor": "time_of_day",
+      "typical": [
+        "night"
+      ],
+      "strength": "medium"
+    }
+  ],
+  "notes": "Only balanced three-phase load in the house. Demo hero (spec 5)."
+}

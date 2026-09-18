@@ -1,0 +1,134 @@
+{
+  "clusters": {
+    "B-160W-3m": {
+      "id": "B-160W-3m",
+      "status": "proposed",
+      "first_proposed": "2026-09-18T09:40:26+03:00",
+      "phases": "B",
+      "watts": 162.0,
+      "duration_s": 180.05,
+      "summary": {
+        "id": "B-160W-3m",
+        "phases": "B",
+        "watts": 162,
+        "watts_spread": 12,
+        "duration_min": 3.0,
+        "occurrences": 4,
+        "sessions": 2,
+        "pulsing": false,
+        "per_session_max": 2,
+        "time_of_day": {
+          "night (00-06)": 1,
+          "evening (17-24)": 3
+        },
+        "weekdays": [
+          "Wed",
+          "Thu",
+          "Fri"
+        ],
+        "first_seen": "16.09 20:14",
+        "last_seen": "18.09 00:18",
+        "span_days": 1.2,
+        "during_ev": 0,
+        "base_part_off": false,
+        "examples": [
+          "Wed 16.09 20:14",
+          "Wed 16.09 20:29",
+          "Thu 17.09 22:50",
+          "Fri 18.09 00:18"
+        ]
+      },
+      "last_updated": "2026-09-18T11:37:22+03:00",
+      "llm_guess": "bathroom_extractor (40%)",
+      "llm_why": "162W on phase B, 3-min non-pulsing sessions, evenings/night and weekdays, likely a briefly activated ventilation device.",
+      "guessed_at_n": 4
+    },
+    "B-1530W-25s": {
+      "id": "B-1530W-25s",
+      "status": "proposed",
+      "first_proposed": "2026-09-18T09:40:26+03:00",
+      "phases": "B",
+      "watts": 1532.0,
+      "duration_s": 24.85,
+      "summary": {
+        "id": "B-1530W-25s",
+        "phases": "B",
+        "watts": 1532,
+        "watts_spread": 43,
+        "duration_min": 0.4,
+        "occurrences": 10,
+        "sessions": 1,
+        "pulsing": true,
+        "per_session_max": 10,
+        "time_of_day": {
+          "day (10-17)": 4,
+          "evening (17-24)": 6
+        },
+        "weekdays": [
+          "Wed"
+        ],
+        "first_seen": "16.09 16:49",
+        "last_seen": "16.09 17:56",
+        "span_days": 1.0,
+        "during_ev": 0,
+        "base_part_off": false,
+        "examples": [
+          "Wed 16.09 16:49",
+          "Wed 16.09 16:50",
+          "Wed 16.09 16:52",
+          "Wed 16.09 16:57",
+          "Wed 16.09 17:14",
+          "Wed 16.09 17:19"
+        ]
+      },
+      "last_updated": "2026-09-18T11:37:22+03:00",
+      "llm_guess": "space_heater (70%)",
+      "llm_why": "1532W on phase B, 24s pulsing cycles (thermostat), 10 occurrences in one evening session, Wednesday use, likely a resistive space heater with temperature control.",
+      "guessed_at_n": 10
+    },
+    "C-440W-36m": {
+      "id": "C-440W-36m",
+      "status": "proposed",
+      "first_proposed": "2026-09-18T09:40:26+03:00",
+      "phases": "C",
+      "watts": 443.1,
+      "duration_s": 2175.95,
+      "summary": {
+        "id": "C-440W-36m",
+        "phases": "C",
+        "watts": 443,
+        "watts_spread": 11,
+        "duration_min": 36.3,
+        "occurrences": 4,
+        "sessions": 4,
+        "pulsing": false,
+        "per_session_max": 1,
+        "time_of_day": {
+          "morning (06-10)": 2,
+          "evening (17-24)": 2
+        },
+        "weekdays": [
+          "Wed",
+          "Thu",
+          "Fri"
+        ],
+        "first_seen": "16.09 20:51",
+        "last_seen": "18.09 07:44",
+        "span_days": 1.5,
+        "during_ev": 0,
+        "base_part_off": false,
+        "examples": [
+          "Wed 16.09 20:51",
+          "Thu 17.09 07:45",
+          "Thu 17.09 18:35",
+          "Fri 18.09 07:44"
+        ]
+      },
+      "last_updated": "2026-09-18T11:37:22+03:00",
+      "llm_guess": "infrared_heat_lamp (50%)",
+      "llm_why": "443W on phase C, 36-min non-pulsing sessions, morn/eve weekdays, likely a bathroom or reptile infrared heat lamp used briefly twice daily.",
+      "guessed_at_n": 4
+    }
+  },
+  "timeframes": {}
+}

@@ -1,0 +1,40 @@
+{
+  "id": "kettle",
+  "display_name": "Water kettle",
+  "tier": 1,
+  "shiftable": false,
+  "signature": {
+    "type": "step",
+    "phase": "B",
+    "step_w": 2000,
+    "step_tolerance_w": 200,
+    "cycling": null
+  },
+  "measured": {
+    "on": "07:42:50 +2016 W on B",
+    "off": "07:44:03 -1984 W on B",
+    "duration_s": 73,
+    "source": "builder test run, Wed 16.09.2026 morning; steps measured on burst-collapsed 3EM readings"
+  },
+  "context_factors": [
+    {
+      "factor": "time_of_day",
+      "typical": [
+        "morning"
+      ],
+      "strength": "medium"
+    },
+    {
+      "factor": "correlates_with",
+      "devices": [
+        "toaster",
+        "coffee_maker",
+        "halogen1",
+        "halogen2"
+      ],
+      "note": "kitchen cluster",
+      "strength": "medium"
+    }
+  ],
+  "notes": "Spec seed said ~1200 W; that came from 1-min averages of a 73 s event. The real step is ~2 kW."
+}

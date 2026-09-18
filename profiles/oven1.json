@@ -1,0 +1,14 @@
+{
+  "id": "oven1",
+  "display_name": "Oven1",
+  "tier": 2,
+  "signature": null,
+  "status": "not_observed",
+  "measured": {
+    "tested": "07:47-07:48",
+    "result": "no step >100 W on any phase in or after the window",
+    "source": "builder test run, Wed 16.09.2026 morning; steps measured on burst-collapsed 3EM readings"
+  },
+  "context_factors": [],
+  "notes": "Never visible in the 3EM data. Needs an explanation before a signature can exist."
+}

@@ -1,0 +1,4 @@
+# PC-only: offline inspection and plotting (spec 11 - signature analysis runs on the PC).
+# Never needed on the Pi3.
+-r requirements.txt
+matplotlib>=3.8

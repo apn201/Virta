@@ -1,0 +1,5 @@
+# Virta runtime - the same list on the PC and the Pi3.
+# Nebius Token Factory is OpenAI-compatible; no Nebius-specific SDK exists or is needed.
+openai>=1.40.0
+# The console (slice 8). pygame-ce: the maintained pygame fork, with wheels for new Pythons.
+pygame-ce>=2.5

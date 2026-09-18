@@ -1,0 +1,38 @@
+{
+  "id": "toaster",
+  "display_name": "Toaster",
+  "tier": 1,
+  "shiftable": false,
+  "signature": {
+    "type": "step",
+    "phase": "B",
+    "step_w": 890,
+    "step_tolerance_w": 120,
+    "cycling": null
+  },
+  "measured": {
+    "on": "07:45:03 +931 W on B",
+    "off": "07:46:01 -847 W on B",
+    "duration_s": 58,
+    "source": "builder test run, Wed 16.09.2026 morning; steps measured on burst-collapsed 3EM readings"
+  },
+  "context_factors": [
+    {
+      "factor": "time_of_day",
+      "typical": [
+        "morning"
+      ],
+      "strength": "medium"
+    },
+    {
+      "factor": "correlates_with",
+      "devices": [
+        "kettle",
+        "coffee_maker"
+      ],
+      "note": "kitchen cluster",
+      "strength": "medium"
+    }
+  ],
+  "notes": "Off-step smaller than on-step: the element draws less once hot. Match on either."
+}
