@@ -1,5 +1,7 @@
 # Virta
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 **A cheap meter and a reasoning model: cheap sensor, expensive brain.**
 
 Virta turns one ~50 EUR Shelly 3EM on the main supply into an energy advisor that
@@ -44,10 +46,15 @@ discovery / labelling (`virta/labeller.py`).
   that day. Only per-month figures are estimates, and they're labelled as such.
 - **Every number on a console line is checked** against the digest the model was given;
   a line with a number that isn't in it is dropped.
-- **The meter, not the person.** Insights about presence, sleep, guests or health are
-  dropped in code, not just discouraged in the prompt.
+- **Personal, never creepy.** Playful guesses anchored in a device are welcome ("EV AT
+  FULL TILT. DRIVING FERRARI TODAY?"). Lines about health, mood, relationships, visitors,
+  sleep or the bathroom, or saying the house is empty, are dropped in code
+  (`virta/guardrails.py`) - not just discouraged in the prompt.
 - **Propose, then confirm.** Nemotron's guesses about unknown loads are hypotheses; nothing
-  becomes a profile until you name it (`labels/worklist.md`). Advice never switches anything.
+  becomes a profile until you name it (`labels/worklist.md`). Virta switches only the
+  lights you list in `VIRTA_CONTROL`, announces it first, and gives you a grace period to
+  cancel. It never touches the EV and never turns anything on except a configured
+  cheaper light. HA automations are never edited - Virta only calls services.
 - **Private by design.** Raw power never leaves the house. Nemotron sees abstractions only:
   running loads, the price curve, a compact nightly digest (`var/digest.json` - always
   inspectable).
@@ -71,7 +78,25 @@ Build order per spec §12:
 8. **Console** - the single-screen instrument, windowed on the PC for development;
    fullscreen HDMI on the Pi is the same code.
 
-Next: deploy to the Raspberry Pi 3. Optional after that: HA action path, M5 panel.
+9. **Acting through Home Assistant** - Virta speaks (TTS), shows its state on a lamp, and
+   swaps an expensive light for a cheaper one when the price turns.
+
+Next: deploy to the Raspberry Pi 3. Optional after that: M5 panel.
+
+## Three models, one endpoint
+
+Each tier runs on the smallest Nemotron that does its job well, all on Token Factory:
+
+| Job | Model | Typical call |
+|---|---|---|
+| Live line (Tier 1) | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` | ~1.3k tokens |
+| Naming unknown loads | `nvidia/nemotron-3-super-120b-a12b` | a few k tokens, rare |
+| Nightly understanding (Tier 2) | `nvidia/Nemotron-3-Ultra-550b-a55b` | ~5.2k tokens, once a night |
+
+Ultra wrote better nightly insights than the smaller Lightning model *and* used about
+half the tokens (5.2k vs ~11k). Override any tier with `NEBIUS_MODEL_LIVE`,
+`NEBIUS_MODEL_LABELS`, `NEBIUS_MODEL_NIGHTLY`. What we learned about the platform is in
+[FEEDBACK.md](FEEDBACK.md).
 
 ## Setup
 
@@ -89,6 +114,14 @@ Set three env vars (or copy `.env.example` to `.env` and fill it in — real env
 | `NEBIUS_BASE_URL` | no | `https://api.tokenfactory.nebius.com/v1/` |
 | `NEBIUS_TIMEOUT_S` | no | `60` |
 | `NEBIUS_MAX_TOKENS` | no | `2048` |
+| `NEBIUS_MODEL_LIVE` / `_LABELS` / `_NIGHTLY` | no | Nano / Super / Ultra (see above) |
+| `HA_URL`, `HA_TOKEN` | for everything past slice 2 | — |
+| `VIRTA_TTS_PLAYER`, `VIRTA_TTS_ENTITY`, `VIRTA_TTS_LANG` | to let Virta speak | off |
+| `VIRTA_LAMP`, `VIRTA_LAMP_BRIGHTNESS` | a status lamp | off |
+| `VIRTA_CONTROL` | lights Virta may switch off | none |
+| `VIRTA_AUTO`, `VIRTA_SWAP`, `VIRTA_AUTO_GRACE_S` | act without asking; `off=on` swaps; cancel window | none / none / `15` |
+
+All of them are documented in `.env.example`.
 
 ```powershell
 $env:NEBIUS_API_KEY  = "<your Token Factory key>"
@@ -107,10 +140,11 @@ $env:NEBIUS_MODEL_ID = "nvidia/<exact-catalog-id>"
 | `python -m virta.replay [--fetch] [--day YYYY-MM-DD]` | runs history through the detector, prints events + end state | no |
 | `python -m virta.check_detector` | synthetic §5.2 cases + the labelled 16.09 test run | no |
 | `python -m virta.labeller [--refresh] [--no-llm]` | clusters unknowns, acts on answers, updates `labels/worklist.md` | at most one call |
-| `python -m virta.live [--minutes N] [--once] [--quiet] [--dry] [--no-nightly]` | the live loop: advice on situation change, nightly pass at 03:30 | gated calls |
+| `python -m virta.live [--demo] [--minutes N] [--once] [--quiet] [--dry] [--no-nightly]` | the live loop: advice on situation change, nightly pass at 03:30 | gated calls |
 | `python -m virta.nightly [--no-llm] [--show-digest]` | archive + discovery + digest + one deep insight call | up to two calls |
 | `python -m virta.console [--size WxH] [--fullscreen]` | the instrument, drawn from `var/state.json` | no |
 | `python -m virta.console --snapshot out.png` | render one frame to a file, no window | no |
+| `python -m virta.demo [--from HH:MM] [--speed N] [--no-llm]` | replays the published sample day through the same pipeline | gated calls |
 | `python -m virta.advisor [--scenario ev\|kitchen\|idle] [--show-payload]` | one advice call, from `state.json` or a scenario on the real price curve | one call |
 
 `inspect_power` needs matplotlib: `pip install -r requirements-dev.txt` (PC only - the Pi
@@ -400,6 +434,86 @@ in amber and the disc stops, so a dead loop can't pass for a quiet house.
 resolution with `--size 800x480`). `python -m virta.live --state-out <file>` lets a test
 run write elsewhere than the running loop.
 
+## Two voices, and demo mode
+
+The live line is Nemotron's. When a load is genuinely worth moving it speaks as a clean
+instrument ("PRICE PEAK. DEFER EV -> 01:00. EST 6.1 C/KWH CHEAPER."). The rest of the time
+it **observes**, in a dry voice about what the meter shows right now: what already ran
+today, what's usual for this house (from the nightly analysis), the rhythms it can hear.
+Example: "TOASTER AND KETTLE ON B, TOGETHER AGAIN." Both voices go through the guardrails;
+a line that fails is replaced by a plain one. Measured on Lightning: ~4.4k tokens per
+call once the prompt said "commit to the first good line" (before that it polished past
+8k). Nano, now the live model, does it in ~1.3k.
+
+Budget: 30 calls/h and 250/day, with a fresh observation every 30 min even when nothing
+changes. `python -m virta.live --demo` refreshes every 5 min and allows 60/h for filming,
+with **the same daily cap**, so a long demo can't burn the credits.
+
+## Acting through Home Assistant (`virta/actions.py`)
+
+Nemotron's reply can carry two optional actions next to the console line: `speak` (a
+sentence for the smart speaker) and `ha_action` (switch a light). Code decides whether
+they happen:
+
+- **Voice** - `tts.speak` on a configured speaker. Quiet 23:00-08:00, at most 4 per hour,
+  10 min apart; only a switch announcement may bypass that.
+- **Lamp** - one existing light shows what Virta is doing: waiting, a cheap window to
+  run in, something noticed, calm. Brightness is kept low so it reads as an indicator.
+- **Control** - only lights in `VIRTA_CONTROL`, only `turn_off`, and only when the price
+  is expensive or peak. Lights in `VIRTA_AUTO` are switched without asking: Virta announces
+  "Switching Big Bang off and Rengasvalo 2 on", waits `VIRTA_AUTO_GRACE_S`, then acts.
+  The console shows a countdown and `N` cancels. Anything else is a proposal that waits for
+  `Y`. `VIRTA_SWAP` names the one light that may be turned *on* in its place.
+
+Which light is which comes from the profiles (`ha_entity`), mapped by matching relay
+times in HA history against detector events (~15 s lag, `ha_entity_evidence`). When HA
+says a mapped light is on, the detection confidence goes to 0.98 ("HA confirms").
+
+Every action is logged to `var/actions.jsonl`.
+
+**Filming the switch scene.** A real expensive hour can't be booked, so the loop reads an
+override price for the current slot from `var/demo_price` (c/kWh). The console marks it
+**DEMO PRICE** in amber, and Nemotron gets the same payload it would get at a real peak:
+
+```bash
+echo 15 > var/demo_price     # Big Bang on -> Virta announces, then swaps it for Rengasvalo 2
+rm var/demo_price            # back to the real price
+```
+
+## Demo replay and sample data
+
+`samples/` holds one real day from this house (the 16.09 test morning), shifted in time
+and published as-is: per-phase power as HA recorded it, and that day's Nordpool prices, plus the nightly
+insights that day produced. `python -m virta.demo` replays it through the same detector,
+scoring, rhythms and advisor as the live loop, so the console can be shown without
+access to the house. The rest of the household history stays local (`data/`, git-ignored).
+
+## Rhythms - loads found by pattern, whatever their size
+
+The step detector needs a sustained step of 120 W or more. Some devices never make one:
+they switch for a second or a minute, over and over. `virta/rhythm.py` pairs small steps
+into pulses (briefly on, or briefly off), groups pulses of the same size on the same
+phase, and reports a **rhythm** when it repeats. It runs on HA's full-resolution history
+every 5 min, since 15 s polling would miss a 2-second pulse. Only rhythms that repeat at
+least 4 times an hour are reported.
+
+Found in this house on 18.09 (none of them visible to the step detector):
+
+| Rhythm | What it does | How often |
+|---|---|---|
+| `C-DIP35W-2s` | something on C drops out by 35 W for 2 s | every ~2 min, 22/h |
+| `A-DIP20W-12s` | a 20 W load on A pauses for ~10 s | every ~2 min, 12/h |
+| `A-ON20W-2m` | a 20 W load on A runs ~1.5 min | every ~2 min, 4/h |
+
+They're listed on the console under RHYTHMS and passed to Nemotron with every live call.
+
+## Callouts on the trace
+
+The trace and the table share glyphs. Each detected session gets its glyph box on the
+step where it switched on, a leader to the line, and a bracket to where it ended. Rhythms
+get a lane of ticks along the top of the plot, one per pulse, tagged `~C-` / `~A+` like
+their table rows.
+
 ## EV rule (builder decision)
 
 The Eve charger sends nothing to HA. The EV is detected purely by its signature - the
@@ -412,7 +526,7 @@ flagged unreliable**, because the charger's load control can absorb other loads.
 - `virta/config.py` — env-driven config: Nebius, Home Assistant, cost control.
 - `virta/nebius_client.py` — OpenAI client pointed at Nebius; `reasoning_content` handling.
 - `virta/cost_control.py` — price tiers, situation hash, debounce, caps, spend ledger.
-- `virta/ha_client.py` — read-only HA REST client (stdlib only, Pi-friendly).
+- `virta/ha_client.py` — HA REST client (stdlib only, Pi-friendly); `call_service` is the one write path.
 - `virta/history.py` — CSV + HA history loader, spec §3.5 rules, burst collapse, phase alignment.
 - `virta/ev_signature.py` — EV charge sessions by signature; the "others unreliable" flag.
 - `virta/inspect_power.py` — slice 3 report and plots.
@@ -429,6 +543,13 @@ flagged unreliable**, because the charger's load control can absorb other loads.
 - `virta/nightly.py` — Tier 2 nightly: digest, deep call, grounding + guardrail checks.
 - `virta/archive.py` — the local power/price archive, kept forever.
 - `virta/console.py` — the instrument: one renderer, windowed or fullscreen.
+- `virta/rhythm.py` — small cyclic loads, recognised by their rhythm.
+- `virta/guardrails.py` — what every Nemotron line must pass: not creepy, numbers real.
+- `virta/prices.py` — the real Nordpool price as a step function; exact costing.
+- `virta/actions.py` — voice, status lamp, light control with announce-then-act.
+- `virta/demo.py` — replays `samples/` through the live pipeline.
+- `samples/` — one published real day (time-shifted) for the demo.
+- `FEEDBACK.md` — what building on Token Factory + Nemotron taught us.
 - `virta/fsutil.py` — atomic writes that retry through a briefly locked file (Dropbox on the dev PC).
 - `usage_profile.txt` — your habits, in plain sentences (spec §3.4).
 - `labels/` — `worklist.md` (yours to answer) and `clusters.json` (the pass's memory).
@@ -458,3 +579,7 @@ block rather than trusting the whole string.
    Handled once, in `_extract_text`, which also reports the source field.
 2. **No function/tool calling through the OpenAI wrapper.** `chat()` never passes `tools=` or
    `response_format=`; structured output will come from prompting for JSON and parsing it.
+
+## License
+
+MIT - see [LICENSE](LICENSE).

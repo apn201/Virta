@@ -100,6 +100,7 @@ def chat(
     *,
     client: OpenAI | None = None,
     max_tokens: int | None = None,
+    model: str | None = None,
 ) -> ChatResult:
     """Send ONE chat completion and return the answer text plus its source field.
 
@@ -110,7 +111,7 @@ def chat(
 
     try:
         resp = client.chat.completions.create(
-            model=config.model_id,
+            model=model or config.model_id,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -175,7 +176,7 @@ def chat(
         source=source,
         content=content,
         reasoning_content=reasoning,
-        model=getattr(resp, "model", config.model_id),
+        model=getattr(resp, "model", model or config.model_id),
         usage=usage,
         finish_reason=str(getattr(resp.choices[0], "finish_reason", "") or ""),
     )

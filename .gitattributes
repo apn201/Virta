@@ -1,0 +1,4 @@
+# Same bytes on the Windows dev PC and the Raspberry Pi: text is stored and checked out with LF.
+* text=auto eol=lf
+*.png binary
+*.gz binary

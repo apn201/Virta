@@ -120,6 +120,28 @@ class HAClient:
         except json.JSONDecodeError as exc:
             raise HAError(f"Home Assistant returned non-JSON from {url}: {exc}") from exc
 
+    def call_service(self, domain: str, service: str, data: dict[str, Any]) -> Any:
+        """The ONE write path: POST /api/services/<domain>/<service>.
+
+        Only virta/actions.py calls this, and only for its allowlisted actions
+        (speak, the Virta lamp, confirmed turn-offs). Everything else stays read-only.
+        """
+        url = self.config.api_url + f"services/{domain}/{service}"
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(data).encode("utf-8"),
+            method="POST",
+            headers={"Authorization": f"Bearer {self.config.token}", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+                body = response.read().decode("utf-8")
+                return json.loads(body) if body else None
+        except urllib.error.HTTPError as exc:
+            raise HAError(f"Home Assistant refused {domain}.{service} (HTTP {exc.code}): {exc.read()[:200]!r}") from exc
+        except urllib.error.URLError as exc:
+            raise HAError(f"Could not reach Home Assistant for {domain}.{service}: {exc.reason}") from exc
+
     # --- reads --------------------------------------------------------------
     def ping(self) -> str:
         """GET /api/ - confirms URL, token and that the API is up."""

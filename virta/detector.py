@@ -38,6 +38,8 @@ Light enough for a Pi3: a handful of comparisons per phase per reading.
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
@@ -59,6 +61,7 @@ EV_BALANCE_MIN_RATIO = 0.6
 # (a halogen measured +230 on, -194 off on 17.09).
 OFF_TOLERANCE_FRACTION = 0.25
 OFF_TOLERANCE_MIN_W = 80.0
+PAIR_CONFIDENCE = 0.85  # two loads read from one step: a little less sure than one clean match
 EV_RELIABILITY_FACTOR = 0.5  # other detections' confidence while the EV charges
 EV_OFF_FRACTION = 0.5  # all three phases dropping this share of the EV draw = EV off
 BASE_PART_MAX_OFF = timedelta(hours=24)  # off longer than this = the base load really changed
@@ -87,6 +90,7 @@ class ActiveLoad:
     reason: str
     unreliable: bool = False
     profile: Profile | None = field(default=None, repr=False)
+    pair_key: int | None = None  # read as one of two loads from a single step; the partner's key
 
     @property
     def total_w(self) -> float:
@@ -354,9 +358,7 @@ class StackingDetector:
         for phase, delta in ups.items():
             events.extend(self._on_single(when, phase, delta))
         for phase, delta in downs.items():
-            event = self._off_single(when, phase, delta)
-            if event:
-                events.append(event)
+            events.extend(self._off_single(when, phase, delta))
         return events
 
     @staticmethod
@@ -434,6 +436,20 @@ class StackingDetector:
             if err <= profile.tolerance_w and err < best_err:
                 best, best_err = profile, err
         if best is None:
+            pair = self._on_pair(phase, delta)
+            if pair is not None:
+                (a, b), err, tolerance = pair
+                conf = _signature_confidence(err, tolerance) * PAIR_CONFIDENCE
+                if ev is not None:
+                    conf *= EV_RELIABILITY_FACTOR
+                reason = (f"+{delta:.0f} W on {phase} = {a.display_name} + {b.display_name} "
+                          f"({a.step_w:.0f} + {b.step_w:.0f} W) switched on in the same reading")
+                share = delta / (a.step_w + b.step_w)  # split the measured step in proportion
+                events = [self._add(when, {phase: a.step_w * share}, a, conf, reason, unreliable=ev is not None),
+                          self._add(when, {phase: b.step_w * share}, b, conf, reason, unreliable=ev is not None)]
+                first, second = self.active[-2], self.active[-1]
+                first.pair_key, second.pair_key = second.key, first.key
+                return events
             reason = f"+{delta:.0f} W on {phase}, above the base load but matches no profile"
             return [self._add(when, {phase: delta}, None, 0.0, reason, unreliable=ev is not None)]
         conf = _signature_confidence(best_err, best.tolerance_w)
@@ -445,6 +461,23 @@ class StackingDetector:
         # was missed; retire the stale instance so it cannot haunt the stack.
         events: list[Event] = []
         stale = next((l for l in self.active if l.profile is best), None)
+        if stale is not None and stale.pair_key is not None:
+            # The pair guess was wrong: this device wasn't on after all (18.09 07:44,
+            # +425 W on C read as both halogens; it was one unknown load). Undo it -
+            # the two halves become the one unknown load the step really was.
+            partner = next((l for l in self.active if l.key == stale.pair_key), None)
+            self.active.remove(stale)
+            if partner is not None:
+                for p, w in stale.draw.items():
+                    partner.draw[p] = partner.draw.get(p, 0.0) + w
+                partner.load_id, partner.display_name, partner.profile = "unknown", "unknown", None
+                partner.state, partner.confidence, partner.pair_key = LoadState.UNKNOWN, 0.0, None
+                partner.reason = f"{partner.total_w:+.0f} W step first read as two loads; {best.display_name} "                                  "switched on separately, so it was one unknown load"
+                events.append(self._event(when, "RELABEL", partner, dict(partner.draw), partner.reason))
+            else:
+                for p, w in stale.draw.items():
+                    self.drift[p] += w
+            stale = None
         if stale is not None:
             self.active.remove(stale)
             for p, w in stale.draw.items():
@@ -455,6 +488,20 @@ class StackingDetector:
             ))
         events.append(self._add(when, {phase: delta}, best, conf, reason, unreliable=ev is not None))
         return events
+
+    def _on_pair(self, phase: str, delta: float):
+        """Two known loads switched on within one reading (kettle + toaster, 18.09 14:13:05-06).
+        Only pairs, only devices not already on; tolerances add in quadrature."""
+        running = {l.profile.id for l in self.active if l.profile is not None}
+        steps = [p for p in self.profiles if p.kind == "step" and p.phase == phase and p.id not in running]
+        best, best_err, best_tol = None, float("inf"), 0.0
+        for i, a in enumerate(steps):
+            for b in steps[i + 1:]:
+                tolerance = math.hypot(a.tolerance_w, b.tolerance_w)
+                err = abs(delta - (a.step_w + b.step_w))
+                if err <= tolerance and err < best_err:
+                    best, best_err, best_tol = (a, b), err, tolerance
+        return None if best is None else (best, best_err, best_tol)
 
     def _ev_off(self, downs: dict[str, float]) -> bool:
         ev = self.ev
@@ -472,14 +519,12 @@ class StackingDetector:
         for p in PHASES:
             leftover = -downs[p] - ev.draw.get(p, 0.0)
             if leftover >= STEP_MIN_W:
-                extra = self._off_single(when, p, -leftover)
-                if extra:
-                    self._ev_off_leftovers.append(extra)
+                self._ev_off_leftovers.extend(self._off_single(when, p, -leftover))
             elif leftover <= -STEP_MIN_W:
                 self.drift[p] -= leftover  # dropped less than its draw: charger had throttled
         return event
 
-    def _off_single(self, when: datetime, phase: str, delta: float) -> Event | None:
+    def _off_single(self, when: datetime, phase: str, delta: float) -> list[Event]:
         drop = -delta
         best, best_err = None, float("inf")
         for load in self.active:
@@ -495,13 +540,24 @@ class StackingDetector:
             if err <= tolerance and err < best_err:
                 best, best_err = load, err
         if best is not None:
-            return self._remove(when, best, {phase: delta}, f"-{drop:.0f} W on {phase} matches its draw")
+            return [self._remove(when, best, {phase: delta}, f"-{drop:.0f} W on {phase} matches its draw")]
+
+        # Several loads ending inside one reading (both halogens off 4 s apart,
+        # 18.09 14:14): the drop is the SUM of their draws. And if removing every
+        # load on the phase lands it back at the base load, they all ended - a drop
+        # back to base is never a base part switching off.
+        together = self._off_together(phase, drop)
+        if together:
+            names = " + ".join(l.display_name for l in together)
+            return [self._remove(when, l, {phase: -l.draw.get(phase, 0.0)},
+                                 f"-{drop:.0f} W on {phase}: {names} ended in the same reading")
+                    for l in together]
 
         ev = self.ev
         if ev is not None and ev.draw.get(phase):
             # charger throttling: its draw on this phase shrinks, no event
             ev.draw[phase] = max(0.0, ev.draw[phase] - drop)
-            return self._event(when, "EV_ADJUST", ev, {phase: delta}, "charger throttled (load control)")
+            return [self._event(when, "EV_ADJUST", ev, {phase: delta}, "charger throttled (load control)")]
 
         # Nothing running above the base load explains the drop, so part of the
         # base load itself switched off (a PC, a server, ventilation stepping
@@ -520,7 +576,31 @@ class StackingDetector:
         else:
             conf = 0.0
             reason = f"-{drop:.0f} W on {phase} below the base load: part of it switched off"
-        return self._add(when, {phase: -drop}, best_profile, conf, reason, unreliable=False, kind="BASE_OFF")
+        return [self._add(when, {phase: -drop}, best_profile, conf, reason, unreliable=False, kind="BASE_OFF")]
+
+    def _off_together(self, phase: str, drop: float) -> list[ActiveLoad]:
+        """The set of running loads on a phase whose draws add up to one drop."""
+        running = [l for l in self.active
+                   if l is not self.ev and not l.base_part_off and l.draw.get(phase, 0.0) > 0][:8]
+        if len(running) < 2:
+            best_set: list[ActiveLoad] = []
+        else:
+            best_set, best_err = [], float("inf")
+            for mask in range(1, 1 << len(running)):
+                subset = [l for i, l in enumerate(running) if mask >> i & 1]
+                if len(subset) < 2:
+                    continue
+                total = sum(l.draw[phase] for l in subset)
+                tolerance = max(OFF_TOLERANCE_MIN_W, OFF_TOLERANCE_FRACTION * total)
+                err = abs(drop - total)
+                if err <= tolerance and err < best_err:
+                    best_set, best_err = subset, err
+        if best_set:
+            return best_set
+        everything = sum(l.draw[phase] for l in running)
+        if running and 0 <= drop - everything < STEP_MIN_W:
+            return running  # back at the base load: everything on this phase ended
+        return []
 
     # --- stack edits --------------------------------------------------------
     def _add(

@@ -115,7 +115,7 @@ def occurrences_from_events(path: str | Path) -> list[Occurrence]:
             continue
         # BASE_OFF starts a NEGATIVE occurrence (a base part switched off) that
         # BASE_ON / BASE_SHIFT ends - clustered exactly like loads switching on.
-        if event["kind"] in ("ON", "BASE_OFF"):
+        if event["kind"] in ("ON", "BASE_OFF", "RELABEL"):  # RELABEL: a wrong pair guess became one unknown
             ons[event["load_key"]] = event
         elif event["kind"] in ("OFF", "OFF_RECONCILED", "BASE_ON", "BASE_SHIFT"):
             offs[event["load_key"]] = event

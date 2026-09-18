@@ -24,7 +24,8 @@ CREEPY = re.compile(
     r"\b((?:you(?:'re| are| were)?|nobody|no one|everyone|anyone)(?: is| was)? (?:home|away|out|gone)"
     r"|home (?:more|less)|empty house|house (?:is |was )?empty|vacation|holiday|travel\w*"
     # sleep, the body, the bathroom
-    r"|asleep|awake|sleep\w*|slept|woke|wake up|insomnia|in bed|shower\w*|bath(?:ing|room)?\b|toilet"
+    # what is intimate - not the room: "bathroom extractor" is a device and passes
+    r"|asleep|awake|sleep\w*|slept|woke|wake up|insomnia|in bed|shower\w*|bathing|in the bath\b|toilet"
     r"|naked|drunk|hangover"
     # health and mood
     r"|health|sick|ill\b|illness|disease|mood|sad|depress\w*|lonely|alone|stress\w*"

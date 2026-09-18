@@ -1,12 +1,36 @@
+# --- secrets: never commit ------------------------------------------------------
 .env
-.venv/
-__pycache__/
-*.pyc
-var/
+.env.*
+!.env.example
 
-# Raw household power data never leaves the house (spec 11) - keep it out of the public repo.
+# --- household data: raw power never leaves the house (spec 11) -----------------
 csv/
 data/
+# runtime state: ledger, console snapshot, event logs, cached insights, model replies
+var/
 
-# worklist backup written by the labelling pass
+# --- written by the labelling pass ----------------------------------------------
 labels/*.bak
+
+# --- temp files: atomic writes rename a *.tmp over the target; a crash can leave one
+*.tmp
+
+# --- Python ---------------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# --- OS / editors / sync --------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+.dropbox
+.dropbox.attr

@@ -32,6 +32,7 @@ from datetime import datetime, timedelta
 from datetime import time as dtime
 from pathlib import Path
 
+from .actions import Controls, Lamp, Voice, mood_for
 from .advisor import Advice, advise
 from .baseline import BaselineTracker
 from .config import ConfigError, load_cost_config, load_ha_config
@@ -42,6 +43,7 @@ from .fsutil import atomic_write_text
 from .ha_client import HAClient, HAError, parse_price_curve
 from .history import Frame, align_phases, fetch_history
 from .prices import PriceCurve
+from .rhythm import strong_rhythms
 from .profiles import load_profiles
 from .scoring import Context, score_state
 
@@ -54,6 +56,8 @@ COMMENTARY_ROTATE_MIN = 3  # one cached insight at a time, unobtrusive (spec 9)
 TRACE_MINUTES = 20  # history the console scrolls through
 RECENT_MINUTES = 30  # finished sessions stay on the console this long...
 RECENT_MAX = 4  # ...up to this many
+RHYTHM_EVERY_S = 300  # rhythms re-measured every 5 min...
+RHYTHM_WINDOW_H = 2  # ...over the last 2 h of full-resolution history
 
 
 class InsightFeed:
@@ -106,11 +110,23 @@ class LiveReader:
         self._context_at: float = 0.0
         self.price: float | None = None
         self.price_attrs: dict = {}
+        self.price_override: float | None = None
         self.curve = PriceCurve([])  # the real slots, for costing sessions as they run
         self.tomorrow_valid = False
         self.is_dark: bool | None = None
         self.outdoor: float | None = None
         self.indoor: float | None = None
+        self.linked: dict[str, str] = {}  # HA state of devices profiles link to (cross-check)
+        self.linked_ids: list[str] = []
+
+    def refresh_linked(self) -> None:
+        """Every tick: HA's own on/off for linked devices - fresh enough to confirm a
+        switch-on the moment the detector reports it (a 60 s cache would lag)."""
+        for entity_id in self.linked_ids:
+            try:
+                self.linked[entity_id] = self.client.get_state(entity_id).state
+            except HAError:
+                self.linked.pop(entity_id, None)
 
     def frame(self, now: datetime) -> Frame | None:
         """One reading. Total is A+B+C computed here - the HA total sensor is the
@@ -129,7 +145,11 @@ class LiveReader:
         price, attrs = self.client.price_now()
         self.price = price
         self.price_attrs = attrs  # the curve, for the advice call
-        self.curve = PriceCurve.from_nordpool(attrs)
+        self.price_override = demo_price()
+        if self.price_override is not None:  # demo scene: a price spike on cue, clearly flagged
+            self.price = self.price_override
+            self.price_attrs = override_current_slot(attrs, self.price_override)
+        self.curve = PriceCurve.from_nordpool(self.price_attrs)
         self.tomorrow_valid = bool(attrs.get("tomorrow_valid"))
         self.is_dark = self.client.is_dark()
         self.outdoor = self.client.get_state(cfg.entity("SENSOR_TEMP_OUT")).value
@@ -181,6 +201,52 @@ def session_summary(load, until: datetime, curve: PriceCurve, *, finished: bool 
                         "base_part_off": load.base_part_off, "since": load.since.isoformat(),
                         "ended": until.isoformat()})
     return summary
+
+
+def name_rhythms(summaries: list[dict], profiles: list) -> list[dict]:
+    """Give a rhythm its name if a profile describes it (signature type "rhythm")."""
+    named = [p for p in profiles if (p.raw.get("signature") or {}).get("type") == "rhythm"]
+    for r in summaries:
+        for p in named:
+            sig = p.raw["signature"]
+            same_kind = sig.get("kind") == r["kind"] and sig.get("phase") == r["phase"]
+            size_ok = abs(r["amplitude_w"] - sig.get("amplitude_w", 0)) <= 0.3 * max(sig.get("amplitude_w", 1), 1)
+            if same_kind and size_ok:
+                r["name"] = p.display_name
+                r["profile"] = p.id
+                break
+    return summaries
+
+
+DEMO_PRICE_FILE = Path("var/demo_price")
+
+
+def demo_price() -> float | None:
+    """A demo price override in c/kWh, read from var/demo_price (empty/absent = off).
+    For filming the action scene on cue; the console flags it in amber - never silent."""
+    try:
+        text = DEMO_PRICE_FILE.read_text(encoding="utf-8").strip()
+        return float(text) if text else None
+    except (OSError, ValueError):
+        return None
+
+
+DEMO_PRICE_MINUTES = 60  # a real price spike lasts; one expensive slot followed by a cheap one
+                         # just teaches the model to wait it out (seen live 18.09, 14:08)
+
+
+def override_current_slot(attrs: dict, price: float) -> dict:
+    """The Nordpool attributes with the current slot and the next hour replaced by the demo price."""
+    now = datetime.now().astimezone()
+    until = now + timedelta(minutes=DEMO_PRICE_MINUTES)
+    out = dict(attrs)
+    for key in ("raw_today", "raw_tomorrow"):
+        slots = []
+        for slot in attrs.get(key) or []:
+            start, end = datetime.fromisoformat(str(slot["start"])), datetime.fromisoformat(str(slot["end"]))
+            slots.append({**slot, "value": price} if start < until and end > now else slot)
+        out[key] = slots
+    return out
 
 
 def price_curve_for_console(attrs: dict) -> list[list]:
@@ -236,16 +302,42 @@ def run(args: argparse.Namespace) -> int:
 
     detector = StackingDetector(profiles, tracker.current)
     gate = CloudCallGate(cost_cfg)
+    # ACT (actions.py): voice, the Virta lamp, and suggest-and-confirm control.
+    # Each is opt-in from .env; unset means Virta acts on nothing.
+    voice, lamp, controls = Voice(client), Lamp(client), Controls(client)
+    reader.linked_ids = sorted({p.raw["ha_entity"] for p in profiles if p.raw.get("ha_entity")} | set(controls.allow))
+    controllable: list[dict] = []
+    last_action: dict = {}
+    print(f"  act      voice {voice.player or 'off'} | lamp {lamp.entity or 'off'} | "
+          f"control {', '.join(controls.allow) or 'off'} | HA-linked {', '.join(reader.linked_ids) or 'none'}")
     # One worker: at most one advice call in flight. A reasoning call takes 10-60 s;
     # the 15 s local loop must never wait for it.
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nemotron")
     in_flight: Future | None = None
     asking: dict = {}  # what the call in flight was asked about - shown on the console while it thinks
     last_advice: dict = {}
+    last_state: dict = {}
+    expensive_since: datetime | None = None  # the house rule's clock
+    rule_cooldown: dict[str, datetime] = {}  # entity -> last answered/acted; a "no" is respected
 
     feed = InsightFeed()
     trace: deque = deque()
     recent: deque = deque(maxlen=RECENT_MAX)  # finished sessions, with their final real cost
+    rhythms: dict = {"list": [], "at": None}  # small cyclic loads, found by pattern (rhythm.py)
+    rhythm_thread: threading.Thread | None = None
+    rhythm_due = 0.0
+
+    def measure_rhythms() -> None:
+        """Full-resolution history: a 2 s dip is invisible to 15 s polling but not to HA."""
+        try:
+            since = datetime.now().astimezone() - timedelta(hours=RHYTHM_WINDOW_H)
+            series, _ = fetch_history(client, list(reader.phase_ids), since)
+            by_phase = dict(zip("ABC", (series.get(eid, []) for eid in reader.phase_ids)))
+            found = [r.summary() for r in strong_rhythms(by_phase)]
+            rhythms["list"] = name_rhythms(found, profiles)
+            rhythms["at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        except Exception as exc:  # a rhythm hiccup must never touch the live loop
+            print(f"{datetime.now():%H:%M:%S}  RHYTHM   measurement skipped: {exc!r}")
     try:  # pre-fill the console trace from HA so a restart doesn't blank it
         since = datetime.now().astimezone() - timedelta(minutes=TRACE_MINUTES)
         series, _ = fetch_history(client, ha_cfg.power_entities, since)
@@ -287,6 +379,67 @@ def run(args: argparse.Namespace) -> int:
         status = "ok" if code == 0 else f"code {code}, previous insights kept"
         print(f"{datetime.now():%H:%M:%S}  NIGHTLY  finished ({status}) - {cached} insights cached")
 
+    controllable_at = [0.0]
+
+    def act_on(advice: Advice, stamp: datetime) -> None:
+        """Turn Nemotron's answer into action: lamp mood, voice, proposal."""
+        action = advice.action or {}
+        unusual = any(l.get("unusual") for l in (last_state.get("loads") or []))
+        tier = (last_state.get("price") or {}).get("tier")
+        result = lamp.show(mood_for({"action": action}, tier, unusual), why=action.get("reason", ""))
+        if result.startswith(("lamp", "failed")):
+            print(f"{stamp:%H:%M:%S}  ACT    {result}")
+        proposal = controls.propose(action.get("ha_action"), why=action.get("reason", ""))
+        if proposal and proposal["policy"] == "auto":
+            swap = f" and {proposal['swap_name']} on" if proposal.get("swap_name") else ""
+            print(f"{stamp:%H:%M:%S}  ACT    AUTO in {controls.grace_s:g}s: {proposal['name']} off{swap}")
+            voice.say(f"{advice.verdict}. Switching {proposal['name']} off{swap}.", why="auto action", urgent=True)
+        elif proposal:
+            print(f"{stamp:%H:%M:%S}  ACT    PROPOSED: turn off {proposal['name']} - confirm on the console")
+            voice.say(f"{advice.verdict}. Shall I turn off {proposal['name']}? Confirm on the console.",
+                      why="proposal", urgent=True)
+        elif action.get("voice") == "advice" or action.get("speak"):
+            said = voice.say(advice.verdict, why=action.get("reason", ""))
+            print(f"{stamp:%H:%M:%S}  ACT    voice: {said}")
+
+    def house_rule(now: datetime) -> None:
+        """The standing rule behind VIRTA_AUTO + VIRTA_SWAP: at an expensive or peak price,
+        an auto light that is on gets swapped for its cheaper partner. Nemotron gets the
+        first word - its own ha_action wins - but a light the owner asked to be managed
+        this way must not depend on the model choosing to (18.09: Nano saw PEAK and
+        decided to wait). Announced out loud, N cancels, a "no" holds for 30 min."""
+        nonlocal expensive_since
+        price = last_state.get("price") or {}
+        if price.get("tier") not in ("expensive", "peak"):
+            expensive_since = None
+            return
+        expensive_since = expensive_since or now
+        if controls.pending or in_flight is not None or not controls.auto:
+            return
+        asked_after = last_advice.get("at") and datetime.fromisoformat(last_advice["at"]) >= expensive_since
+        if not asked_after and now - expensive_since < timedelta(seconds=90):
+            return  # Nemotron hasn't answered about this price yet
+        for dev in controls.devices():
+            entity = dev["entity_id"]
+            if dev["policy"] != "auto" or dev["state"] != "on":
+                continue
+            if entity in rule_cooldown and now - rule_cooldown[entity] < timedelta(minutes=30):
+                continue
+            why = f"house rule: price {price.get('tier')} ({price.get('c_kwh')} c/kWh), {dev['name']} on"
+            proposal = controls.propose({"entity_id": entity, "service": "light.turn_off"}, why=why)
+            if not proposal:
+                continue
+            rule_cooldown[entity] = now
+            swap = f" and {proposal['swap_name']} on" if proposal.get("swap_name") else ""
+            tier_word = "at its peak" if price.get("tier") == "peak" else "expensive"
+            c = price.get("c_kwh")
+            cents = f", {c:.0f} cents" if isinstance(c, (int, float)) else ""
+            print(f"{now:%H:%M:%S}  ACT    HOUSE RULE, AUTO in {controls.grace_s:g}s: {proposal['name']} off{swap}")
+            lamp.show("noticed", why=why)
+            voice.say(f"Electricity is {tier_word}{cents}. Switching {proposal['name']} off{swap}.",
+                      why="house rule", urgent=True)
+            return
+
     def harvest(*, block: bool = False) -> None:
         nonlocal in_flight, last_advice
         if in_flight is None or (not block and not in_flight.done()):
@@ -300,6 +453,7 @@ def run(args: argparse.Namespace) -> int:
         gate.add_usage(advice.usage, now=stamp)
         if advice.ok:
             gate.set_verdict(advice.verdict, now=stamp)
+            act_on(advice, stamp)
             last_advice = {**advice.to_json(), "at": stamp.isoformat(),
                            "tokens": advice.usage.get("completion_tokens"), "asked": dict(asking)}
             print(f"{stamp:%H:%M:%S}  NEMOTRON  >> {advice.verdict}")
@@ -327,6 +481,18 @@ def run(args: argparse.Namespace) -> int:
         started = time.monotonic()
         now = datetime.now().astimezone()
         harvest()
+        if demo_price() != reader.price_override:  # the demo price changed: apply it now, not in 60 s
+            reader.refresh_context(force=True)
+        answer, done = controls.check_answer()  # the human's Y/N from the console
+        if answer:
+            last_action = {"at": now.isoformat(timespec="seconds"), "result": answer,
+                           "name": (done or {}).get("name"), "entity_id": (done or {}).get("entity_id")}
+            print(f"{now:%H:%M:%S}  ACT    proposal {answer}: {(done or {}).get('name', '')}")
+            if answer == "done" and (done or {}).get("policy") == "confirm":  # auto was announced already
+                voice.say(f"Done. {(done or {}).get('name', 'It')} is off.", why="confirmed action", urgent=True)
+            if (done or {}).get("entity_id"):
+                rule_cooldown[done["entity_id"]] = now
+        house_rule(now)
         try:
             reader.refresh_context()
             frame = reader.frame(now)
@@ -359,7 +525,8 @@ def run(args: argparse.Namespace) -> int:
 
             state = detector.state()
             context = Context(now, reader.is_dark, reader.outdoor, reader.indoor)
-            scored = score_state(state, context)
+            reader.refresh_linked()
+            scored = score_state(state, context, reader.linked)
 
             tier = price_tier(reader.price, cost_cfg) if reader.price is not None else None
             # the console's scrolling trace: the last TRACE_MINUTES of readings
@@ -389,7 +556,8 @@ def run(args: argparse.Namespace) -> int:
                 "context": {"part_of_day": context.describe(), "is_dark": reader.is_dark,
                             "outdoor_c": reader.outdoor, "indoor_c": reader.indoor},
                 "price": {"c_kwh": reader.price, "tier": str(tier) if tier else None,
-                          "tomorrow_valid": reader.tomorrow_valid},
+                          "tomorrow_valid": reader.tomorrow_valid,
+                          "demo_override": reader.price_override is not None},
             }
 
             # --- the cloud loop: gated, event-driven, never blocking the tick ---
@@ -430,6 +598,20 @@ def run(args: argparse.Namespace) -> int:
             while recent and now - datetime.fromisoformat(recent[-1]["ended"]) > timedelta(minutes=RECENT_MINUTES):
                 recent.pop()
             snapshot["recent"] = list(recent)
+            if time.monotonic() >= rhythm_due and (rhythm_thread is None or not rhythm_thread.is_alive()):
+                rhythm_due = time.monotonic() + RHYTHM_EVERY_S
+                rhythm_thread = threading.Thread(target=measure_rhythms, name="rhythm", daemon=True)
+                rhythm_thread.start()
+            snapshot["rhythms"] = rhythms["list"]
+            if controls.allow and (not controllable or reader._context_at != controllable_at[0]):
+                controllable[:] = controls.devices()  # refreshed with the slow context
+                controllable_at[0] = reader._context_at
+            snapshot["controllable"] = controllable
+            snapshot["proposal"] = controls.pending
+            snapshot["last_action"] = last_action
+            snapshot["lamp"] = {"mood": lamp.mood, "entity": lamp.entity} if lamp.enabled else None
+            snapshot["voice_on"] = voice.enabled
+            snapshot["rhythms_at"] = rhythms["at"]
             snapshot["advice"] = last_advice
             snapshot["reasoning"] = {"in_flight": in_flight is not None, "demo": bool(args.demo),
                                      **(asking if in_flight is not None else {})}
@@ -445,6 +627,8 @@ def run(args: argparse.Namespace) -> int:
                 nightly_thread = threading.Thread(target=run_nightly_in_background, args=(now,),
                                                   name="nightly", daemon=True)
                 nightly_thread.start()
+            last_state.clear()
+            last_state.update(snapshot)
             _atomic_json(args.state_out, snapshot)
 
         if args.once or (deadline and time.monotonic() >= deadline):

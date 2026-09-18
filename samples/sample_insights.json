@@ -1,0 +1,40 @@
+{
+ "generated_at": "2026-09-18T13:21:20+03:00",
+ "window": {
+  "from": "Tue 15.09 23:14",
+  "to": "Fri 18.09 13:20",
+  "days": 2.6,
+  "note": "only 2.6 days of history exist so far - treat patterns as early",
+  "history_days_archived": 4
+ },
+ "insights": [
+  {
+   "kind": "efficiency",
+   "line": "EV CHARGER RAN 08:51 WED, PAID 0.23 EUR. OVERNIGHT SAVES ~2 EUR/MO.",
+   "model_explanation": "The EV charged 08:51–10:42 Wednesday at 1.18 c/kWh (0.226 EUR). The cheapest same-length window that night (03:45–05:36) would have cost 0.053 EUR. Monthly estimate at this rate: ~2 EUR savings. EV is marked shiftable; pattern says it usually charges overnight and must finish by 07:00 weekdays.",
+   "evidence": "ev_charger.run Wed 08:51-10:42 paid 0.226 EUR; cheapest window 0.053 EUR; saving_per_month_if_run_at_cheapest_eur 2.01; shiftable true; usage_patterns deadline 07:00",
+   "confidence": 0.9
+  },
+  {
+   "kind": "behavior",
+   "line": "HALOGEN2 1.2X/DAY AM. HALOGEN1 0.8X/DAY AM+PM. KETTLE/TOASTER DAYTIME.",
+   "model_explanation": "Halogen2 runs 1.16/day, mostly mornings (2) and once midday. Halogen1 runs 0.77/day, split morning/evening. Kettle 1.16/day (morning + 2 daytime). Toaster 1.55/day (1 morning, 3 daytime). Morning peak usage evident; lights and cooking cluster in daytime hours.",
+   "evidence": "halogen2.runs_per_day 1.16, starts_by_part_of_day morning 2 day 1; halogen1.runs_per_day 0.77, morning 1 evening 1; kettle.runs_per_day 1.16, morning 1 day 2; toaster.runs_per_day 1.55, morning 1 day 3",
+   "confidence": 0.7
+  },
+  {
+   "kind": "carbon",
+   "line": "EV CHARGED 1.18 C/KWH AM, BELOW 3.04 AVG. NIGHT 1.83 - OFTEN MORE WIND.",
+   "model_explanation": "The EV charge averaged 1.18 c/kWh (morning), below the week's market average of 3.04 c/kWh. Night hours averaged 1.83 c/kWh; in the Nordic grid cheap hours often coincide with high wind output. Overnight charging would likely align with greener generation.",
+   "evidence": "ev_charger.avg_price_paid_c_kwh 1.18; prices.avg_market_price_c_kwh 3.04; prices.avg_by_part_of_day_c_kwh.night 1.83",
+   "confidence": 0.6
+  },
+  {
+   "kind": "efficiency",
+   "line": "BASE LOAD 987W, 21.6 EUR/MO EST. NO PARTS OFF. 120W LIMIT HIDES SMALL.",
+   "model_explanation": "Base load steady at 987–990W (ventilation, fridge, freezer, servers, miners bundled). Costs ~21.6 EUR/month at this week's prices. No base_parts_switched_off detected. Meter detection limit ~120W means smaller always-on devices (e.g. a single server, router) are invisible inside the bundle.",
+   "evidence": "base_load.now_w 987, by_day_w 987-990; base_load_per_month_eur 21.6; base_parts_switched_off empty; detection_limit_note steps under ~120W not visible",
+   "confidence": 0.8
+  }
+ ]
+}

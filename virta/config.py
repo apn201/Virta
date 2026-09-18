@@ -19,6 +19,12 @@ from pathlib import Path
 # --- spec defaults ----------------------------------------------------------
 DEFAULT_NEBIUS_BASE_URL = "https://api.tokenfactory.nebius.com/v1/"
 DEFAULT_TIMEOUT_S = 60.0
+# Right-sized models per reasoning tier (the track text: "Reach for Nemotron 3 Ultra
+# when you need serious reasoning, and let Nano or Super handle the fast, everyday
+# calls"). NEBIUS_MODEL_ID stays the fallback for anything unset.
+DEFAULT_MODEL_LIVE = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"  # Tier 1: frequent, fast
+DEFAULT_MODEL_LABELS = "nvidia/nemotron-3-super-120b-a12b"  # discovery guesses
+DEFAULT_MODEL_NIGHTLY = "nvidia/Nemotron-3-Ultra-550b-a55b"  # Tier 2: once a night, deepest
 DEFAULT_MAX_TOKENS = 2048  # reasoning tokens come out of this budget too
 
 DEFAULT_HA_BASE_URL = "http://192.168.86.33:8123"  # spec 11, confirmed LAN address
@@ -139,6 +145,9 @@ class NebiusConfig:
     model_id: str
     timeout_s: float = DEFAULT_TIMEOUT_S
     max_tokens: int = DEFAULT_MAX_TOKENS
+    model_live: str = DEFAULT_MODEL_LIVE
+    model_labels: str = DEFAULT_MODEL_LABELS
+    model_nightly: str = DEFAULT_MODEL_NIGHTLY
 
     def __repr__(self) -> str:  # never let the key reach a log or traceback
         return (
@@ -155,7 +164,10 @@ class NebiusConfig:
         return (
             "NEBIUS (cloud reasoning)\n"
             f"  base_url : {self.base_url}\n"
-            f"  model_id : {self.model_id}\n"
+            f"  model_id : {self.model_id}  (fallback)\n"
+            f"  tiers    : live {self.model_live}\n"
+            f"             labels {self.model_labels}\n"
+            f"             nightly {self.model_nightly}\n"
             f"  api_key  : {self.redacted_key}\n"
             f"  timeout  : {self.timeout_s:g}s   max_tokens: {self.max_tokens}"
         )
@@ -196,6 +208,9 @@ def load_nebius_config(*, dotenv_path: str | Path = ".env") -> NebiusConfig:
         model_id=model_id,
         timeout_s=_env_float("NEBIUS_TIMEOUT_S", DEFAULT_TIMEOUT_S),
         max_tokens=_env_int("NEBIUS_MAX_TOKENS", DEFAULT_MAX_TOKENS),
+        model_live=_env_str("NEBIUS_MODEL_LIVE", DEFAULT_MODEL_LIVE),
+        model_labels=_env_str("NEBIUS_MODEL_LABELS", DEFAULT_MODEL_LABELS),
+        model_nightly=_env_str("NEBIUS_MODEL_NIGHTLY", DEFAULT_MODEL_NIGHTLY),
     )
 
 

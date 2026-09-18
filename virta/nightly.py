@@ -167,7 +167,7 @@ def _runs(events: list[Event], window_end: datetime) -> list[dict]:
     open_runs: dict[int, dict] = {}
     runs = []
     for e in events:
-        if e.kind in ("ON", "BASE_OFF") and e.load_key:
+        if e.kind in ("ON", "BASE_OFF", "RELABEL") and e.load_key:
             open_runs[e.load_key] = {"id": e.load_id, "name": e.display_name, "state": e.state,
                                      "phases": e.phases, "watts": sum(e.delta_w.values()), "start": e.when}
         elif e.kind in ("OFF", "OFF_RECONCILED", "BASE_ON", "BASE_SHIFT") and e.load_key in open_runs:
@@ -397,6 +397,23 @@ def build_digest(frames: list[Frame], events: list[Event], floor_updates: list,
 
 
 # --- 5-6. the deep call + edge validation -----------------------------------
+def thin_routine(line: str, digest: dict) -> bool:
+    """True if the line is about an appliance seen fewer than 3 times.
+
+    "It stopped" / "it's overdue" needs a routine to break. The prompt says so,
+    and Ultra still wrote "EV NOT RUN SINCE WED" after ONE observed charge - so
+    it is enforced here too.
+    """
+    upper = line.upper()
+    for aid, a in (digest.get("appliances") or {}).items():
+        words = {aid.upper(), aid.replace("_", " ").upper(), str(a.get("name", "")).upper()}
+        words |= {str(a.get("name", "")).split(" ")[0].upper()}  # "EV" from "EV charger (Eve)"
+        if any(w and len(w) >= 2 and re.search(rf"\b{re.escape(w)}\b", upper) for w in words):
+            if (a.get("runs") or 0) < 3:
+                return True
+    return False
+
+
 def validate(raw: Any, digest: dict | None = None) -> tuple[list[dict], list[str]]:
     """Keep only well-formed insights about devices whose console numbers are real.
 
@@ -421,6 +438,9 @@ def validate(raw: Any, digest: dict | None = None) -> tuple[list[dict], list[str
             kind = "behavior"
         if about_a_person(line, detail):
             dropped.append(f"about a person, not the meter: {line[:60]!r}")
+            continue
+        if kind == "anomaly" and digest is not None and thin_routine(line, digest):
+            dropped.append(f"anomaly about a device with under 3 runs - no routine to break: {line[:60]!r}")
             continue
         if grounded is not None:
             missing = ungrounded_numbers(line, grounded)
@@ -448,7 +468,8 @@ def ask_for_insights(digest: dict, gate: CloudCallGate) -> tuple[list[dict], str
         return [], f"skipped: {exc.args[0].splitlines()[0]}", []
     gate.record_call({})  # counted when SENT (fail closed)
     try:
-        result = chat(config, SYSTEM_PROMPT, json.dumps(digest, ensure_ascii=False), max_tokens=NIGHTLY_MAX_TOKENS)
+        result = chat(config, SYSTEM_PROMPT, json.dumps(digest, ensure_ascii=False), max_tokens=NIGHTLY_MAX_TOKENS,
+                      model=config.model_nightly)  # Tier 2: the deepest, once a night
     except NebiusError as exc:
         return [], f"failed: {str(exc).splitlines()[0]}", []
     gate.add_usage(result.usage)

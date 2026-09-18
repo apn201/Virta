@@ -64,6 +64,10 @@ def main() -> int:
         print(f"CONFIG ERROR\n{exc}", file=sys.stderr)
         return 2
 
+    if len(sys.argv) > 1:  # python -m virta.hello_nebius <model id>: check one tier's model
+        from dataclasses import replace
+
+        config = replace(config, model_id=sys.argv[1])
     print(config.describe(), flush=True)
     print(f"\nSending one completion: {USER_PROMPT!r}", flush=True)
 

@@ -3,6 +3,8 @@
   "display_name": "Halogen 2 (big bang)",
   "tier": 1,
   "shiftable": false,
+  "ha_entity": "light.switch_r",
+  "ha_entity_evidence": "relay on 07:29:06 / off 07:31:02 vs detected 07:29:22 / 07:31:17 (16.09)",
   "signature": {
     "type": "step",
     "phase": "C",

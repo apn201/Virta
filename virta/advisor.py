@@ -19,8 +19,9 @@ sure are we about what's running.
 
 Output handling (spec 2): answer may be in `content` or `reasoning_content`;
 no tool calling - the JSON is prompted for and parsed, validated, and the verdict
-line is rebuilt from the JSON if the model forgot it. Advice only: the action is
-a SUGGESTION. Nothing here ever switches anything.
+line is rebuilt from the JSON if the model forgot it. Nothing here switches
+anything: `speak` and `ha_action` are REQUESTS that actions.py validates, and a
+turn-off only ever happens after a human confirms it on the console.
 
 Run on its own (one real call each):
     python -m virta.advisor                  # from the live loop's var/state.json
@@ -93,12 +94,30 @@ Hard rules for both voices: personal is fine, creepy is not - nothing about \
 health, mood, relationships, visitors, sleep or the bathroom, and never say or \
 imply the house is empty. Every number must come from the data given. Never nag.
 
+You can also ACT, carefully:
+- speak: true makes the console say your line out loud in the room. Use it for \
+actionable advice and for the occasional observation genuinely worth hearing; \
+false for routine lines. Being quiet most of the time is what makes speaking \
+matter.
+- ha_action: you may PROPOSE turning OFF one device from "controllable" (for \
+example lights left on for hours in daylight, or during a price peak). A human \
+must confirm it on the console before anything happens. Only turn_off, only \
+devices listed in controllable, and only with a real reason - never propose \
+turning anything on. (Policy "auto" devices are announced out loud and done \
+after a short grace period instead of waiting for a key.) When the price tier \
+is expensive or peak and a controllable light that has swap_to is ON, propose \
+turning it off: its cheaper swap in the same room takes over, so the room \
+stays lit for less money. Say which light, and that the cheaper one takes over.
+
 Output exactly two things and nothing else:
 Line 1: the console line, at most 60 characters, UPPERCASE.
 Then a JSON object:
 {"voice": "advice" or "observation", "action": "none" or "suggest_defer", \
 "appliance": "<running id>" or null, "defer_until": "HH:MM" or null, \
-"est_saving_c_kwh": number or null, "reason": "one sentence: why this line"}"""
+"est_saving_c_kwh": number or null, "reason": "one sentence: why this line", \
+"speak": true or false, \
+"ha_action": null or {"service": "light.turn_off", "entity_id": "<from controllable>", \
+"name": "<its name>"}}"""
 
 
 # --- inputs -----------------------------------------------------------------
@@ -293,6 +312,8 @@ def build_payload(
         },
         "usage_patterns": read_usage_profile() or "not provided",
         "today_so_far": today_so_far(now),
+        "rhythms": snapshot.get("rhythms") or [],  # small cyclic loads found by pattern, not size
+        "controllable": snapshot.get("controllable") or [],  # what you may propose to switch OFF
         "usual": usual_habits(),
     }
 
@@ -372,8 +393,12 @@ def parse_advice(result, running_ids: set[str], tier: str | None = None, payload
     if not isinstance(saving, (int, float)):
         saving = None
     voice = "advice" if action == "suggest_defer" else "observation"
+    ha_action = parsed.get("ha_action")
+    if not isinstance(ha_action, dict) or not ha_action.get("entity_id"):
+        ha_action = None  # validated again, strictly, against the allowlist in actions.py
     clean = {"voice": voice, "action": action, "appliance": appliance, "defer_until": defer_until,
-             "est_saving_c_kwh": saving, "reason": str(parsed.get("reason", ""))[:300]}
+             "est_saving_c_kwh": saving, "reason": str(parsed.get("reason", ""))[:300],
+             "speak": bool(parsed.get("speak")), "ha_action": ha_action}
 
     verdict = _verdict_line(result.content) if result.source == "content" else ""
     if not verdict:  # rebuild from the JSON rather than show nothing
@@ -412,7 +437,8 @@ def advise(snapshot: dict, price_attrs: dict, *, now: datetime | None = None) ->
     running_ids = {r["id"] for r in payload["running"]}
     try:
         config = load_nebius_config()
-        result = chat(config, SYSTEM_PROMPT, json.dumps(payload, ensure_ascii=False), max_tokens=ADVICE_MAX_TOKENS)
+        result = chat(config, SYSTEM_PROMPT, json.dumps(payload, ensure_ascii=False), max_tokens=ADVICE_MAX_TOKENS,
+                      model=config.model_live)  # Tier 1: fast, frequent
     except (ConfigError, NebiusError) as exc:
         return Advice("", {}, False, f"call failed: {str(exc).splitlines()[0]}"), payload
 

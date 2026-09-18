@@ -274,7 +274,8 @@ def ask_nemotron(guess_for: list[dict], comments: list[dict], gate: CloudCallGat
         return {}, f"skipped: {exc.args[0].splitlines()[0]}"
     gate.record_call({})  # counted when SENT - a crash or failure still counts
     try:
-        result = chat(config, SYSTEM_PROMPT, _payload(guess_for, comments), max_tokens=LLM_MAX_TOKENS)
+        result = chat(config, SYSTEM_PROMPT, _payload(guess_for, comments), max_tokens=LLM_MAX_TOKENS,
+                      model=config.model_labels)
     except NebiusError as exc:
         return {}, f"failed: {str(exc).splitlines()[0]}"
     gate.add_usage(result.usage)

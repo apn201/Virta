@@ -49,6 +49,8 @@ BG = (6, 12, 8)
 PANEL = (9, 18, 12)
 FRAME = (32, 66, 44)
 GRID = (20, 40, 27)
+BAR = (40, 88, 58)  # future price slots: must read on a cheap LCD, not just a good monitor
+BAR_PAST = (26, 56, 37)
 LABEL = (78, 120, 90)
 TEXT_DIM = (96, 150, 110)
 GREEN = (120, 240, 150)  # live data, primary
@@ -56,6 +58,11 @@ GREEN_MID = (70, 190, 110)
 PHASE = {"A": (170, 245, 190), "B": (90, 210, 130), "C": (40, 160, 95)}  # three shades, direct-labelled
 AMBER = (232, 165, 50)  # alerts + expensive price ONLY
 AMBER_DIM = (120, 85, 30)
+
+LAMP_MOODS = {  # the real lamp's colours (actions.MOODS), echoed on screen
+    "wait": ((255, 70, 30), "WAIT"), "run": ((40, 230, 90), "RUN NOW"),
+    "noticed": ((170, 60, 255), "NOTICED"), "calm": ((50, 100, 255), "CALM"),
+}
 
 GLYPH = [  # single-letter load glyphs, terminal idiom (spec 9)
     ("ev", "E"), ("kettle", "K"), ("sauna", "S"), ("oven", "O"), ("halogen", "H"),
@@ -107,14 +114,16 @@ class ConsoleRenderer:
         self.w, self.h = size
         self.s = min(self.w / BASE_W, self.h / BASE_H)
         face = "consolas,dejavusansmono,liberationmono,couriernew,monospace"
-        self.f_tiny = pg.font.SysFont(face, max(9, int(12 * self.s)))
-        self.f_small = pg.font.SysFont(face, max(10, int(15 * self.s)))
-        self.f_mid = pg.font.SysFont(face, max(12, int(20 * self.s)))
-        self.f_verdict = pg.font.SysFont(face, max(14, int(24 * self.s)), bold=True)
-        self.f_verdict_big = pg.font.SysFont(face, max(16, int(30 * self.s)), bold=True)
-        self.f_small_bold = pg.font.SysFont(face, max(10, int(15 * self.s)), bold=True)
-        self.f_comment = pg.font.SysFont(face, max(11, int(17 * self.s)))
-        self.f_big = pg.font.SysFont(face, max(16, int(34 * self.s)), bold=True)
+        self.f_tiny = pg.font.SysFont(face, max(12, int(12 * self.s)))
+        self.f_small = pg.font.SysFont(face, max(13, int(15 * self.s)))
+        self.f_mid = pg.font.SysFont(face, max(16, int(20 * self.s)))
+        self.f_verdict = pg.font.SysFont(face, max(20, int(24 * self.s)), bold=True)
+        self.f_verdict_big = pg.font.SysFont(face, max(25, int(30 * self.s)), bold=True)
+        self.f_small_bold = pg.font.SysFont(face, max(13, int(15 * self.s)), bold=True)
+        self.f_comment = pg.font.SysFont(face, max(14, int(17 * self.s)))
+        self.f_big = pg.font.SysFont(face, max(28, int(34 * self.s)), bold=True)
+        # floors: below the 1280x720 design size (the Pi's 7" 1024x600) text keeps a
+        # readable pixel size instead of shrinking with the layout
         self._text_cache = {}
         m = g = int(self.bezel * self.s)  # the bezel covers these margins
         # Nemotron across the top, read first (spec 0: lead with the reasoning);
@@ -268,6 +277,7 @@ class ConsoleRenderer:
         if len(pts) > 1:
             pg.draw.lines(surface, GREEN, False, pts, max(2, int(2 * s)))
             labels.append([pts[-1][1], "TOTAL", GREEN])
+        self.draw_callouts(surface, state, plot, t0, now, xy, visible)
         labels.sort(key=lambda item: item[0])
         gap = self.f_tiny.get_height()
         for prev, item in zip(labels, labels[1:]):
@@ -286,6 +296,63 @@ class ConsoleRenderer:
         self.draw_ferraris(surface, cx, cy, r, stale)
         kw = f"{total / 1000:.2f} kW" if not stale else "-- kW"
         self.blit(surface, self.f_big, kw, AMBER if stale else GREEN, cx, cy + int(r * 0.55), "midtop")
+
+    def draw_callouts(self, surface, state: dict, plot, t0: float, now: float, xy, visible: list) -> None:
+        """Tie the trace to the detection table: the same glyph, on the step itself.
+
+        Each detected session gets its glyph box just above the total line where
+        it switched on, a thin leader down to the step, and a bracket running to
+        where it ended (or to now). Rhythms get a lane of tick marks along the top
+        of the plot, one tick per pulse, tagged "~" + phase like their table row.
+        """
+        pg, s = self.pg, self.s
+        box_w = int(14 * s)
+
+        def total_at(t: float) -> float:
+            value = visible[0][1] if visible else 0.0
+            for point in visible:
+                if point[0] > t:
+                    break
+                value = point[1]
+            return value
+
+        sessions = [(load, False) for load in state.get("loads") or []] + \
+                   [(load, True) for load in state.get("recent") or []]
+        lanes: list[int] = []  # right edge of the last box in each vertical lane
+        for load, finished in sorted(sessions, key=lambda item: _epoch(item[0].get("since"))):
+            start = _epoch(load.get("since"))
+            end = _epoch(load.get("ended")) if finished else now
+            if not start or end < t0:
+                continue
+            x0 = xy(max(start, t0), 0)[0]
+            x1 = xy(min(end, now), 0)[0]
+            lane = next((i for i, right in enumerate(lanes) if right < x0 - int(4 * s)), len(lanes))
+            if lane == len(lanes):
+                lanes.append(0)
+            lanes[lane] = x0 + box_w
+            y_line = xy(start, total_at(start + 1))[1]
+            y_box = max(plot.y + int(22 * s), y_line - int(26 * s) - lane * int(20 * s))
+            ink = TEXT_DIM if finished or load.get("base_part_off") else (
+                GREEN if load.get("state") == "MATCHED" else GREEN_MID)
+            box = pg.Rect(x0 - box_w // 2, y_box, box_w, box_w)
+            pg.draw.line(surface, ink, (x0, box.bottom), (x0, y_line), 1)  # leader to the step
+            if x1 > x0 + box_w:
+                pg.draw.line(surface, ink, (box.right, box.centery), (x1, box.centery), 1)  # how long it ran
+                pg.draw.line(surface, ink, (x1, box.centery - int(3 * s)), (x1, box.centery + int(3 * s)), 1)
+            pg.draw.rect(surface, PANEL, box)
+            pg.draw.rect(surface, ink, box, 1)
+            self.blit(surface, self.f_tiny, glyph_for(load), ink, box.centerx, box.centery, "center")
+
+        # rhythm lanes along the top of the plot
+        for i, rhythm in enumerate((state.get("rhythms") or [])[:3]):
+            y = plot.y + int(6 * s) + i * int(12 * s)
+            ink = GREEN_MID if rhythm.get("name") else TEXT_DIM
+            sign = "-" if rhythm.get("kind") == "briefly_off" else "+"  # matches the table's -35 W / +20 W
+            self.blit(surface, self.f_tiny, f"~{rhythm.get('phase')}{sign}", ink, plot.x + int(4 * s), y, "midleft")
+            for t in rhythm.get("recent_pulses") or []:
+                if t0 <= t <= now:
+                    x = xy(t, 0)[0]
+                    pg.draw.line(surface, ink, (x, y - int(3 * s)), (x, y + int(3 * s)), 1)
 
     def draw_ferraris(self, surface, cx: int, cy: int, r: int, stale: bool) -> None:
         """The disc of an old kWh meter, seen edge-on through the meter's window.
@@ -357,7 +424,9 @@ class ConsoleRenderer:
         price = state.get("price") or {}
         c = price.get("c_kwh")
         tier = (price.get("tier") or "").upper()
-        self.blit(surface, self.f_small, f"PRICE {c:.2f} c/kWh" if c is not None else "PRICE --", GREEN_MID, x, y)
+        demo = bool(price.get("demo_override"))
+        label = (f"PRICE {c:.2f} c/kWh" if c is not None else "PRICE --") + ("  DEMO PRICE" if demo else "")
+        self.blit(surface, self.f_small, label, AMBER if demo else GREEN_MID, x, y)
         if tier:
             self.blit(surface, self.f_small, tier, AMBER if tier in ("EXPENSIVE", "PEAK") else GREEN,
                       rect.right - int(16 * s), y, "topright")
@@ -373,7 +442,7 @@ class ConsoleRenderer:
         self.blit(surface, self.f_tiny, "LOAD", LABEL, x, y)
         for name, cx in cols.items():
             self.blit(surface, self.f_tiny, name, LABEL, cx, y, "topright")
-        y += int(14 * s)
+        y += self.f_tiny.get_linesize() + 1
         pg.draw.line(surface, GRID, (x, y), (right, y))
         y += int(6 * s)
         if state.get("ev_active"):
@@ -381,8 +450,10 @@ class ConsoleRenderer:
             y += int(18 * s)
         loads = state.get("loads") or []
         recent = state.get("recent") or []
-        row_h = int(22 * s)
-        rows_fit = max(1, (rect.bottom - y - int(28 * s)) // row_h)
+        row_h = max(int(22 * s), self.f_small.get_linesize() + 3)
+        head_h = int(4 * s) + self.f_tiny.get_linesize() + 1  # a section label (RHYTHMS, ENDED)
+        limit = rect.bottom - int(8 * s) - self.f_tiny.get_linesize() - 2  # the footer note sits below
+        rows_fit = max(1, (limit - y) // row_h)
         if not loads:
             self.blit(surface, self.f_small, "NOTHING ABOVE THE BASE LOAD", TEXT_DIM, x, y)
             y += row_h
@@ -391,15 +462,46 @@ class ConsoleRenderer:
             self.draw_load_row(surface, load, x, y, cols, finished=False)
             y += row_h
         rows_fit -= len(loads[:rows_fit])
-        if recent and rows_fit > 0:
+        # what ended (and what it cost) comes next; the rhythms sit at the bottom and
+        # give up their rows as soon as there is something more interesting to show
+        if recent and y + head_h + row_h <= limit:
             y += int(4 * s)
             self.blit(surface, self.f_tiny, "ENDED", LABEL, x, y)
-            y += int(15 * s)
-            for session in recent[:rows_fit]:
+            y += head_h - int(4 * s)
+            for session in recent:
+                if y + row_h > limit:
+                    break
                 self.draw_load_row(surface, session, x, y, cols, finished=True)
                 y += row_h
-        note = self.fit(self.f_tiny, "SURE = HOW WELL SIZE, PHASE AND TIME OF DAY MATCH THE PROFILE", right - x)
+        rhythms = state.get("rhythms") or []
+        fits = min(len(rhythms), max(0, (limit - y - head_h) // row_h))
+        if fits:
+            ry = limit - fits * row_h - head_h + int(4 * s)  # anchored to the bottom, above the footer
+            self.blit(surface, self.f_tiny, "RHYTHMS  -  SMALL LOADS FOUND BY THEIR PATTERN", LABEL, x, ry)
+            ry += head_h - int(4 * s)
+            for r in rhythms[:fits]:
+                self.draw_rhythm_row(surface, r, x, ry, right)
+                ry += row_h
+        note = self.fit(self.f_tiny, "SURE = HOW WELL SIZE, PHASE, TIME FIT THE PROFILE", right - x)
         self.blit(surface, self.f_tiny, note, LABEL, x, rect.bottom - int(8 * s), "bottomleft")
+
+    def draw_rhythm_row(self, surface, r: dict, x: int, y: int, right: int) -> None:
+        """A load known by its rhythm: phase, size, how long each pulse, how often."""
+        pg, s = self.pg, self.s
+        ink = GREEN_MID if r.get("name") else TEXT_DIM
+        box = pg.Rect(x, y + int(1 * s), int(16 * s), int(16 * s))
+        pg.draw.rect(surface, ink, box, 1)
+        self.blit(surface, self.f_tiny, "~", ink, box.centerx, box.centery, "center")
+        off = r.get("kind") == "briefly_off"
+        name = str(r.get("name") or f"{'DIPS' if off else 'PULSES'} ON {r.get('phase')}").upper()
+        every = fmt_duration((r.get("every_s") or 0) / 60) if r.get("every_s") else "-"
+        pulse = r.get("pulse_s") or 0
+        pulse_txt = f"{pulse:.0f}S" if pulse < 90 else fmt_duration(pulse / 60)
+        # compact: the Pi's wider font must still leave room for the name
+        detail = f"{'-' if off else '+'}{r.get('amplitude_w')}W {pulse_txt}  EVERY {every}  {r.get('per_hour'):.0f}/H"
+        detail_img = self.blit(surface, self.f_small, detail, ink, right, y, "topright")
+        room = detail_img.x - (x + int(24 * s)) - int(10 * s)
+        self.blit(surface, self.f_small, self.fit(self.f_small, name, room), ink, x + int(24 * s), y)
 
     def draw_load_row(self, surface, load: dict, x: int, y: int, cols: dict, *, finished: bool) -> None:
         pg, s = self.pg, self.s
@@ -474,7 +576,14 @@ class ConsoleRenderer:
         else:
             status, ink = "NOT YET ASKED", LABEL
         right_edge = rect.right - pad - (self.f_tiny.size(calls)[0] + int(24 * s) if calls else 0)
-        self.blit(surface, self.f_tiny, status, ink, right_edge, name.centery, "midright")
+        status_rect = self.blit(surface, self.f_tiny, status, ink, right_edge, name.centery, "midright")
+        # the Virta lamp: its colour here matches the real lamp in the room
+        lamp = state.get("lamp") or {}
+        if lamp.get("mood"):
+            rgb, word = LAMP_MOODS.get(lamp["mood"], (LABEL, lamp["mood"]))
+            text = self.blit(surface, self.f_tiny, f"LAMP {word}", LABEL, status_rect.x - int(18 * s),
+                             name.centery, "midright")
+            pg.draw.circle(surface, rgb, (text.x - int(9 * s), name.centery), max(3, int(5 * s)))
 
         # left: the live verdict (instrument voice) + WHY
         split = rect.x + int(rect.w * 0.60)
@@ -492,6 +601,24 @@ class ConsoleRenderer:
             for line in self.wrap(self.f_small, reason.upper(), width - w_label.w - int(10 * s))[:2]:
                 self.blit(surface, self.f_small, line, TEXT_DIM, w_label.right + int(10 * s), y)
                 y += int(19 * s)
+
+        # ACT: a proposal waiting for a human (amber - the one alert on screen)
+        proposal = state.get("proposal")
+        last = state.get("last_action") or {}
+        y += int(6 * s)
+        if proposal:
+            name = str(proposal.get("name", "")).upper()
+            swap = f" -> {str(proposal.get('swap_name')).upper()} ON" if proposal.get("swap_name") else ""
+            if proposal.get("policy") == "auto":
+                left = max(0, int(_epoch(proposal.get("act_at")) - now))
+                msg = f"SWITCHING {name} OFF{swap} IN {left} S   [N] CANCEL"
+            else:
+                msg = f"PROPOSED: TURN OFF {name}{swap}   [Y] YES   [N] NO"
+            self.blit(surface, self.f_small_bold, self.fit(self.f_small_bold, msg, width), AMBER, x, y)
+        elif last and now - _epoch(last.get("at")) < 180:
+            words = {"done": "DONE", "declined": "DECLINED", "expired": "EXPIRED", "failed": "FAILED"}
+            msg = f"{words.get(last.get('result'), '')}: {str(last.get('name') or '').upper()}"
+            self.blit(surface, self.f_small, msg, GREEN_MID, x, y)
 
         # right: the evidence it reasoned over - the real price curve
         strip_x = split + pad
@@ -511,7 +638,10 @@ class ConsoleRenderer:
             self.blit(surface, self.f_comment, text[0] if text else "", GREEN_MID, line_x, base_y)
             evidence = str(commentary.get("evidence") or "")
             if evidence:
-                ev = self.wrap(self.f_tiny, f"FROM: {evidence}".replace("_", " ").upper(), rect.right - pad - line_x)
+                width = rect.right - pad - line_x
+                ev = self.wrap(self.f_tiny, f"FROM: {evidence}".replace("_", " ").upper(), width)
+                if len(ev) > 1:
+                    ev = self.wrap(self.f_tiny, " ".join(ev), width - self.f_tiny.size(" ...")[0])
                 self.blit(surface, self.f_tiny, ev[0] + (" ..." if len(ev) > 1 else ""), LABEL, line_x,
                           base_y + int(24 * s))
         else:
@@ -543,7 +673,8 @@ class ConsoleRenderer:
             top = strip.bottom - int((value - lo) / (hi - lo) * strip.h)
             is_now = start <= now < end
             expensive = value >= bounds.get("expensive", 1e9)
-            colour = (AMBER if expensive else GREEN) if is_now else (AMBER_DIM if expensive else GRID)
+            colour = (AMBER if expensive else GREEN) if is_now else (
+                AMBER_DIM if expensive else (BAR_PAST if end <= now else BAR))
             bar = pg.Rect(x0, min(top, zero_y), max(1, x1 - x0 - 1), max(1, abs(zero_y - top)))
             pg.draw.rect(surface, colour, bar)
             if is_now:
@@ -655,6 +786,11 @@ def main(argv: list[str] | None = None) -> int:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key in (pygame.K_ESCAPE, pygame.K_q)):
                     return 0
+                if event.type == pygame.KEYDOWN and event.key in (pygame.K_y, pygame.K_n) and state.get("proposal"):
+                    # the human's answer; the live loop acts on it (the console itself never calls HA)
+                    answer = {"id": state["proposal"]["id"], "answer": "yes" if event.key == pygame.K_y else "no",
+                              "at": datetime.now().astimezone().isoformat(timespec="seconds")}
+                    Path("var/answer.json").write_text(json.dumps(answer), encoding="utf-8")
                 if event.type == pygame.VIDEORESIZE and not args.fullscreen:
                     screen = pygame.display.set_mode(event.size, pygame.RESIZABLE)
                     renderer.resize(screen.get_size())

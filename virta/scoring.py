@@ -72,9 +72,17 @@ class ScoredLoad:
         return f"{self.load.display_name} {self.confidence:.0%}{mark}"
 
 
-def score_load(load: ActiveLoad, context: Context, active_ids: set[str]) -> ScoredLoad:
+def score_load(load: ActiveLoad, context: Context, active_ids: set[str],
+               linked: dict[str, str] | None = None) -> ScoredLoad:
     if load.state is LoadState.UNKNOWN or load.profile is None:
         return ScoredLoad(load, 0.0, load.reason)
+
+    # A second, independent source (spec 13A): if HA controls this device, HA's
+    # own on/off state confirms or contradicts what the meter inferred.
+    entity = load.profile.raw.get("ha_entity")
+    ha_state = (linked or {}).get(entity) if entity else None
+    if ha_state == "on":
+        return ScoredLoad(load, CONF_CEILING, f"{load.reason}; HA confirms {entity} is on")
 
     conf = load.confidence
     reasons = [load.reason]
@@ -107,6 +115,9 @@ def score_load(load: ActiveLoad, context: Context, active_ids: set[str]) -> Scor
                 conf += boost
                 reasons.append(f"{factor.get('note') or 'correlated'}: {', '.join(partners)} also on{dark_note}")
 
+    if ha_state == "off":  # the meter saw its size, but HA says it is off: something else
+        conf *= 0.5
+        reasons.append(f"but HA says {entity} is off - probably a different load of the same size")
     conf = max(CONF_FLOOR, min(CONF_CEILING, conf))
     if conf < UNUSUAL_BELOW and load.confidence >= UNUSUAL_BELOW:
         unusual = True  # a good power match that context pulled down: say so
@@ -115,6 +126,7 @@ def score_load(load: ActiveLoad, context: Context, active_ids: set[str]) -> Scor
     return ScoredLoad(load, conf, "; ".join(reasons), unusual)
 
 
-def score_state(state: DetectionState, context: Context) -> list[ScoredLoad]:
+def score_state(state: DetectionState, context: Context, linked: dict[str, str] | None = None) -> list[ScoredLoad]:
+    """`linked`: HA states of devices profiles are linked to (profile "ha_entity")."""
     active_ids = {l.load_id for l in state.loads if l.state is LoadState.MATCHED}
-    return [score_load(l, context, active_ids) for l in state.loads]
+    return [score_load(l, context, active_ids, linked) for l in state.loads]
