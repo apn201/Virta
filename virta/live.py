@@ -35,7 +35,7 @@ from pathlib import Path
 from .actions import Controls, Lamp, Voice, mood_for
 from .advisor import Advice, advise
 from .baseline import BaselineTracker
-from .config import ConfigError, load_cost_config, load_ha_config
+from .config import ConfigError, load_cost_config, load_ha_config, load_nebius_config
 from .cost_control import CloudCallGate, Situation, price_tier
 from .detector import LoadState, StackingDetector
 from .ev_signature import rough_baseline
@@ -46,6 +46,7 @@ from .prices import PriceCurve
 from .rhythm import strong_rhythms
 from .profiles import load_profiles
 from .scoring import Context, score_state
+from .teach import Teacher
 
 STATE_OUT = "var/state.json"
 EVENTS_OUT = "var/events_live.jsonl"
@@ -58,6 +59,40 @@ RECENT_MINUTES = 30  # finished sessions stay on the console this long...
 RECENT_MAX = 4  # ...up to this many
 RHYTHM_EVERY_S = 300  # rhythms re-measured every 5 min...
 RHYTHM_WINDOW_H = 2  # ...over the last 2 h of full-resolution history
+WARMUP_H = 6  # a restart replays this much history so the stack matches what is really on
+CHAT_MAX = 16  # the console's chat window: what happened, what Virta said and did
+CHAT_KEEP_H = 12  # a restart picks the conversation up if it is younger than this
+
+
+def chat_line_for(event, summary: dict | None) -> str | None:
+    """An event, in words, for the chat window - the house speaking, Virta answering."""
+    name = event.display_name if event.display_name != "unknown" else None
+    watts = sum(event.delta_w.values())
+    phase = event.phases
+    if event.kind == "ON":
+        return f"{name} on" if name else f"Something new on {phase}, {watts:+.0f} W"
+    if event.kind == "OFF":
+        ran = summary.get("minutes") if summary else None
+        cost = summary.get("cost_eur") if summary else None
+        bits = [f"ran {ran:.0f} min" if ran and ran >= 1 else "ran under a minute"] if ran is not None else []
+        if cost:
+            bits.append(f"{cost * 100:.2f} c")
+        who = name or f"The {abs(watts):.0f} W load on {phase}"
+        return f"{who} off" + (f", {', '.join(bits)}" if bits else "")
+    if event.kind == "BASE_OFF":
+        return f"Part of the base load switched off on {phase}, {watts:.0f} W"
+    if event.kind == "BASE_ON":
+        return f"The base load part on {phase} is back on"
+    return None  # EV_ADJUST, RELABEL, reconciliations: bookkeeping, not conversation
+
+
+def load_chat(path: str) -> list[dict]:
+    try:
+        old = json.loads(Path(path).read_text(encoding="utf-8")).get("chat") or []
+        cutoff = datetime.now().astimezone() - timedelta(hours=CHAT_KEEP_H)
+        return [c for c in old if datetime.fromisoformat(c["at"]) >= cutoff][-CHAT_MAX:]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
 
 
 class InsightFeed:
@@ -118,6 +153,25 @@ class LiveReader:
         self.indoor: float | None = None
         self.linked: dict[str, str] = {}  # HA state of devices profiles link to (cross-check)
         self.linked_ids: list[str] = []
+        self.total_id = cfg.entity("SENSOR_TOTAL")
+        self._fed_until: datetime | None = None  # the last history frame the detector has seen
+
+    def new_frames(self, now: datetime) -> list[Frame]:
+        """Every 3EM push since the last tick, from HA's recorder - the detector gets
+        the same full-resolution stream the replay (and every check) runs on.
+        Sampling once per 15 s instead left phantoms on the stack: a washing machine's
+        fast steps on C (18.09 19:22-19:25) read at the wrong instants became an
+        unknown +348 W and a base part -219 W that were never there."""
+        if self._fed_until is None:
+            self._fed_until = now  # start from here; the past is the prefill's business
+            return []
+        series, _ = fetch_history(self.client, [*self.phase_ids, self.total_id],
+                                  self._fed_until - timedelta(minutes=2), now)
+        frames = [f for f in align_phases(series, self.total_id, tuple(self.phase_ids))
+                  if f.when > self._fed_until and None not in f.phases]
+        if frames:
+            self._fed_until = frames[-1].when
+        return frames
 
     def refresh_linked(self) -> None:
         """Every tick: HA's own on/off for linked devices - fresh enough to confirm a
@@ -301,6 +355,20 @@ def run(args: argparse.Namespace) -> int:
         return 1
 
     detector = StackingDetector(profiles, tracker.current)
+    # Warm up on the last hours of history, so a restart starts with the stack that is
+    # really running: an empty one would turn whatever is on now into a phantom
+    # "base part off" the moment it ends. Events are not re-logged; the floor is kept.
+    try:
+        warm_end = datetime.now().astimezone()
+        series, _ = fetch_history(client, [*reader.phase_ids, reader.total_id],
+                                  warm_end - timedelta(hours=WARMUP_H), warm_end)
+        warm = [f for f in align_phases(series, reader.total_id, tuple(reader.phase_ids)) if None not in f.phases]
+        for f in warm:
+            detector.update(f)
+        detector.events.clear()
+        reader._fed_until = warm[-1].when if warm else warm_end
+    except HAError:
+        pass  # start cold; new_frames() starts from now
     gate = CloudCallGate(cost_cfg)
     # ACT (actions.py): voice, the Virta lamp, and suggest-and-confirm control.
     # Each is opt-in from .env; unset means Virta acts on nothing.
@@ -319,6 +387,17 @@ def run(args: argparse.Namespace) -> int:
     last_state: dict = {}
     expensive_since: datetime | None = None  # the house rule's clock
     rule_cooldown: dict[str, datetime] = {}  # entity -> last answered/acted; a "no" is respected
+    chat: deque = deque(load_chat(args.state_out), maxlen=CHAT_MAX)
+    # Teach by gesture (teach.py): an unknown load gets a guess out loud; switching
+    # it off and on again confirms it and a profile is written.
+    teacher = Teacher()
+    teach_exec = ThreadPoolExecutor(max_workers=1, thread_name_prefix="teach")
+    teach_job: dict = {}  # {"future", "candidate"} while a guess is being made
+
+    def say_chat(kind: str, text: str, at: datetime, **extra) -> None:
+        """kind: event (the house), virta (Nemotron's line), act (what Virta did)."""
+        if text:
+            chat.append({"at": at.isoformat(timespec="seconds"), "kind": kind, "text": text, **extra})
 
     feed = InsightFeed()
     trace: deque = deque()
@@ -393,9 +472,11 @@ def run(args: argparse.Namespace) -> int:
         if proposal and proposal["policy"] == "auto":
             swap = f" and {proposal['swap_name']} on" if proposal.get("swap_name") else ""
             print(f"{stamp:%H:%M:%S}  ACT    AUTO in {controls.grace_s:g}s: {proposal['name']} off{swap}")
+            say_chat("act", f"Switching {proposal['name']} off{swap} in {controls.grace_s:g} s", stamp)
             voice.say(f"{advice.verdict}. Switching {proposal['name']} off{swap}.", why="auto action", urgent=True)
         elif proposal:
             print(f"{stamp:%H:%M:%S}  ACT    PROPOSED: turn off {proposal['name']} - confirm on the console")
+            say_chat("act", f"Proposed: turn off {proposal['name']}", stamp)
             voice.say(f"{advice.verdict}. Shall I turn off {proposal['name']}? Confirm on the console.",
                       why="proposal", urgent=True)
         elif action.get("voice") == "advice" or action.get("speak"):
@@ -435,10 +516,67 @@ def run(args: argparse.Namespace) -> int:
             c = price.get("c_kwh")
             cents = f", {c:.0f} cents" if isinstance(c, (int, float)) else ""
             print(f"{now:%H:%M:%S}  ACT    HOUSE RULE, AUTO in {controls.grace_s:g}s: {proposal['name']} off{swap}")
+            say_chat("act", f"Price {price.get('tier')}: switching {proposal['name']} off{swap} "
+                            f"in {controls.grace_s:g} s", now)
             lamp.show("noticed", why=why)
             voice.say(f"Electricity is {tier_word}{cents}. Switching {proposal['name']} off{swap}.",
                       why="house rule", urgent=True)
             return
+
+    def learn_from(c, when: datetime) -> None:
+        """The gesture came: write the profile, adopt the running load, say so."""
+        profile = teacher.learn(c, when)
+        reason = f"taught by gesture: guessed '{c.guess}', confirmed by switching it off and on"
+        event = detector.adopt(when, c.extra["confirmed_key"], profile, reason)
+        if event is not None:
+            with open(EVENTS_OUT, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event.to_json()) + "\n")
+        print(f"{when:%H:%M:%S}  TEACH  learned {profile.id}: {profile.phase} {profile.step_w:.0f} W "
+              f"+/-{profile.tolerance_w:.0f} -> profiles/{profile.id}.json")
+        say_chat("act", f"Learned: {profile.display_name}, {profile.phase} {profile.step_w:.0f} W", when)
+        line = f"Noted. The {c.guess} it is - I shall know it next time."
+        say_chat("virta", line, when, why=f"the {c.guess} was switched off and on again to confirm the guess")
+        voice.say(line, why="taught by gesture", urgent=True)
+        lamp.show("run", why="learned a new appliance")
+
+    def teach_tick(now: datetime) -> None:
+        """Harvest a finished guess; start one for an unknown load that has settled."""
+        job = teach_job.get("future")
+        if job is not None and job.done():
+            c = teach_job["candidate"]
+            teach_job.clear()
+            try:
+                res = job.result()
+            except Exception as exc:  # a failed guess must never touch the loop
+                res = {"ok": False, "why": repr(exc)}
+            gate.add_usage(res.get("usage") or {}, now=now)
+            if res.get("ok") and not c.done:
+                c.guess, c.confidence, c.line = res["guess"], res.get("confidence"), res["line"]
+                print(f"{now:%H:%M:%S}  TEACH  guess for {c.phase} {c.step_w:.0f} W: {c.guess} "
+                      f"({c.confidence}) - waiting for the off-and-on gesture")
+                say_chat("virta", c.line, now, why=res.get("reason", ""), teach=True)
+                voice.say(c.line, why="identify a new load", urgent=True)
+                lamp.show("noticed", why=f"guessing a new load: {c.guess}")
+            else:
+                print(f"{now:%H:%M:%S}  TEACH  no guess ({res.get('why', 'failed')})")
+        if teach_job or args.dry:
+            return
+        c = teacher.due(now, {l.key for l in detector.active})
+        if c is None:
+            return
+        decision = gate.allow_housekeeping(f"identify a new {c.step_w:.0f} W load on {c.phase}", now=now)
+        teacher.mark_asked(c, now)  # asked (or refused) once - never retried in a loop
+        if not decision.should_call:
+            print(f"{now:%H:%M:%S}  TEACH  not asking: {decision.reason}")
+            return
+        try:
+            config = load_nebius_config()
+        except ConfigError:
+            return
+        gate.record_call({}, now=now)  # counted when SENT
+        payload = teacher.build_payload(c, last_state, detector.profiles, now)
+        print(f"{now:%H:%M:%S}  TEACH  asking Nemotron what the new {c.step_w:.0f} W on {c.phase} is")
+        teach_job.update(future=teach_exec.submit(Teacher.identify, config, payload), candidate=c)
 
     def harvest(*, block: bool = False) -> None:
         nonlocal in_flight, last_advice
@@ -457,6 +595,8 @@ def run(args: argparse.Namespace) -> int:
             last_advice = {**advice.to_json(), "at": stamp.isoformat(),
                            "tokens": advice.usage.get("completion_tokens"), "asked": dict(asking)}
             print(f"{stamp:%H:%M:%S}  NEMOTRON  >> {advice.verdict}")
+            say_chat("virta", advice.verdict, stamp, why=str(advice.action.get("reason", "")),
+                     tokens=advice.usage.get("completion_tokens"), voice=advice.action.get("voice"))
             print(f"{'':10s}action {json.dumps(advice.action, ensure_ascii=False)}"
                   f"  ({advice.usage.get('completion_tokens', '?')} tokens, from {advice.source})")
             for note in advice.warnings:
@@ -488,6 +628,9 @@ def run(args: argparse.Namespace) -> int:
             last_action = {"at": now.isoformat(timespec="seconds"), "result": answer,
                            "name": (done or {}).get("name"), "entity_id": (done or {}).get("entity_id")}
             print(f"{now:%H:%M:%S}  ACT    proposal {answer}: {(done or {}).get('name', '')}")
+            said = {"done": "Done: {} off", "declined": "Cancelled: {} stays on", "expired": "Proposal expired: {}",
+                    "failed": "Could not switch {}"}.get(answer, "{}")
+            say_chat("act", said.format((done or {}).get("name", "it")), now)
             if answer == "done" and (done or {}).get("policy") == "confirm":  # auto was announced already
                 voice.say(f"Done. {(done or {}).get('name', 'It')} is off.", why="confirmed action", urgent=True)
             if (done or {}).get("entity_id"):
@@ -495,7 +638,11 @@ def run(args: argparse.Namespace) -> int:
         house_rule(now)
         try:
             reader.refresh_context()
-            frame = reader.frame(now)
+            frame = reader.frame(now)  # what the screen shows now
+            try:
+                pushes = reader.new_frames(now)  # what the detector learns from
+            except HAError:
+                pushes = [frame] if frame is not None else []  # recorder hiccup: fall back to the snapshot
             failures = 0
         except HAError as exc:
             failures += 1
@@ -510,19 +657,29 @@ def run(args: argparse.Namespace) -> int:
             print(f"{now:%H:%M:%S}  a phase reported unavailable - tick skipped")
         else:
             ticks += 1
-            before = {l.key: l for l in detector.active}  # to cost a session the moment it ends
-            for event in detector.update(frame):
-                ended = before.get(event.load_key)
-                if ended is not None and event.kind in ("OFF", "OFF_RECONCILED", "BASE_ON", "BASE_SHIFT"):
-                    recent.appendleft(session_summary(ended, event.when, reader.curve, finished=True))
-                print(f"{now:%H:%M:%S}  EVENT  {event.describe()[18:]}")
-                with open(EVENTS_OUT, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(event.to_json()) + "\n")
-            new_floor = tracker.observe(detector.calibration_frame(frame), stack_empty=detector.calibration_ready)
-            if new_floor:
-                detector.set_baseline(new_floor)
-                print(f"{now:%H:%M:%S}  BASE   base load recalibrated from a quiet stretch -> {new_floor.describe()}")
+            for fed in pushes:  # every push since the last tick, in order
+                before = {l.key: l for l in detector.active}  # to cost a session the moment it ends
+                for event in detector.update(fed):
+                    ended = before.get(event.load_key)
+                    if ended is not None and event.kind in ("OFF", "OFF_RECONCILED", "BASE_ON", "BASE_SHIFT"):
+                        recent.appendleft(session_summary(ended, event.when, reader.curve, finished=True))
+                    print(f"{event.when:%H:%M:%S}  EVENT  {event.describe()[18:]}")
+                    say_chat("event", chat_line_for(event, recent[0] if ended is not None and recent else None),
+                             event.when)
+                    taught = teacher.observe(event, now)
+                    if taught is not None:
+                        learn_from(taught, event.when)
+                    with open(EVENTS_OUT, "a", encoding="utf-8") as fh:
+                        fh.write(json.dumps(event.to_json()) + "\n")
+                taught = teacher.watch(fed)  # the off-and-on flick, on the raw reading
+                if taught is not None:
+                    learn_from(taught, fed.when)
+                new_floor = tracker.observe(detector.calibration_frame(fed), stack_empty=detector.calibration_ready)
+                if new_floor:
+                    detector.set_baseline(new_floor)
+                    print(f"{now:%H:%M:%S}  BASE   base load recalibrated from a quiet stretch -> {new_floor.describe()}")
 
+            teach_tick(now)
             state = detector.state()
             context = Context(now, reader.is_dark, reader.outdoor, reader.indoor)
             reader.refresh_linked()
@@ -546,7 +703,7 @@ def run(args: argparse.Namespace) -> int:
                     {"id": s.load.load_id, "name": s.load.display_name, "state": str(s.load.state),
                      "phases": s.load.phases, "draw_w": s.load.draw, "confidence": round(s.confidence, 3),
                      "reason": s.reason, "unusual": s.unusual, "unreliable": s.unreliable,
-                     "base_part_off": s.load.base_part_off,
+                     "base_part_off": s.load.base_part_off, "guess": teacher.guess_for(s.load.key),
                      **session_summary(s.load, now, reader.curve),
                      "since": s.load.since.isoformat(), "label": s.label()}
                     for s in scored
@@ -558,6 +715,7 @@ def run(args: argparse.Namespace) -> int:
                 "price": {"c_kwh": reader.price, "tier": str(tier) if tier else None,
                           "tomorrow_valid": reader.tomorrow_valid,
                           "demo_override": reader.price_override is not None},
+                "chat": list(chat),
             }
 
             # --- the cloud loop: gated, event-driven, never blocking the tick ---
@@ -613,6 +771,7 @@ def run(args: argparse.Namespace) -> int:
             snapshot["voice_on"] = voice.enabled
             snapshot["rhythms_at"] = rhythms["at"]
             snapshot["advice"] = last_advice
+            snapshot["chat"] = list(chat)  # again: harvest/acts may have added lines this tick
             snapshot["reasoning"] = {"in_flight": in_flight is not None, "demo": bool(args.demo),
                                      **(asking if in_flight is not None else {})}
             commentary = feed.current(now)  # last night's understanding - the dry voice
@@ -645,6 +804,9 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):  # a model may write "≈" or "–"; a cp1252 console must not crash the loop
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--once", action="store_true", help="one tick, then exit")
     parser.add_argument("--minutes", type=float, default=0, help="stop after this long (default: run forever)")

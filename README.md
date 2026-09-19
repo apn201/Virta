@@ -85,16 +85,18 @@ Next: deploy to the Raspberry Pi 3. Optional after that: M5 panel.
 
 ## Three models, one endpoint
 
-Each tier runs on the smallest Nemotron that does its job well, all on Token Factory:
+Each tier runs on the Nemotron that does its job well, all on Token Factory:
 
 | Job | Model | Typical call |
 |---|---|---|
-| Live line (Tier 1) | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` | ~1.3k tokens |
+| The butler's live line (Tier 1) | `nvidia/nemotron-3-super-120b-a12b` | ~1-2k tokens, ~18 s |
 | Naming unknown loads | `nvidia/nemotron-3-super-120b-a12b` | a few k tokens, rare |
 | Nightly understanding (Tier 2) | `nvidia/Nemotron-3-Ultra-550b-a55b` | ~5.2k tokens, once a night |
 
 Ultra wrote better nightly insights than the smaller Lightning model *and* used about
-half the tokens (5.2k vs ~11k). Override any tier with `NEBIUS_MODEL_LIVE`,
+half the tokens (5.2k vs ~11k). The live line started on Nano (~1.3k tokens), but Nano
+wrote flat instrument lines and never took up the butler's voice; Super noticed more with
+a similar token count. Override any tier with `NEBIUS_MODEL_LIVE`,
 `NEBIUS_MODEL_LABELS`, `NEBIUS_MODEL_NIGHTLY`. What we learned about the platform is in
 [FEEDBACK.md](FEEDBACK.md).
 
@@ -434,20 +436,61 @@ in amber and the disc stops, so a dead loop can't pass for a quiet house.
 resolution with `--size 800x480`). `python -m virta.live --state-out <file>` lets a test
 run write elsewhere than the running loop.
 
-## Two voices, and demo mode
+## The butler, the chat window, and demo mode
 
-The live line is Nemotron's. When a load is genuinely worth moving it speaks as a clean
-instrument ("PRICE PEAK. DEFER EV -> 01:00. EST 6.1 C/KWH CHEAPER."). The rest of the time
-it **observes**, in a dry voice about what the meter shows right now: what already ran
-today, what's usual for this house (from the nightly analysis), the rhythms it can hear.
-Example: "TOASTER AND KETTLE ON B, TOGETHER AGAIN." Both voices go through the guardrails;
-a line that fails is replaced by a plain one. Measured on Lightning: ~4.4k tokens per
-call once the prompt said "commit to the first good line" (before that it polished past
-8k). Nano, now the live model, does it in ~1.3k.
+Virta's live voice is a **butler**. It's not there to save money; it's there to notice.
+When a load can genuinely be shifted, he says so plainly or acts. The rest of the time he
+comments on the house's data: what just happened, today against yesterday and recent
+days, the base load's trend, the weather, a rhythm he can hear. The price comes up only
+when it is doing something notable. Real lines from 19.09:
 
-Budget: 30 calls/h and 250/day, with a fresh observation every 30 min even when nothing
+```
+The house has used 9.9 kWh so far today, a touch more than yesterday at this hour,
+while the base load holds steady at about 1 kW.
+The kettle and toaster have been on for ten minutes, suggesting breakfast is underway.
+```
+
+What he talks about is computed at the edge (`virta/story.py`): today's kWh vs the same
+clock time yesterday, recent whole days from the local archive, the outdoor/indoor
+temperatures over 24 h. The model gets conclusions, never the power stream.
+
+The console shows it as a **chat window**: the house's events (switch-ons and offs, with
+run time and cost) as small time-stamped lines, what Virta did in amber, and his lines in
+green. The newest line types itself out, and older ones fade and scroll off the top.
+The loop keeps the last 16 lines across restarts, and the model sees its own recent
+lines so it doesn't repeat itself.
+
+Guardrails are the same as before: no creepy topics, every number grounded, and a line that
+parrots the prompt's example wording is dropped. `VIRTA_PERSONA=instrument` brings back
+the old uppercase instrument voice ("PRICE PEAK. DEFER EV -> 01:00.").
+
+Budget: 30 calls/h and 250/day, with a fresh line every 15 min even when nothing
 changes. `python -m virta.live --demo` refreshes every 5 min and allows 60/h for filming,
 with **the same daily cap**, so a long demo can't burn the credits.
+
+## Teach by gesture (`virta/teach.py`)
+
+The house learns a new appliance from one example, and the light switch is the only
+interface:
+
+1. Something unknown switches on: a step on one phase that matches no profile.
+2. After 20 s, Super guesses what it is from the step's size, phase, the time and what
+   else is running. The butler says it out loud and in the chat: *"Something new on A,
+   1184 W, likely a hair dryer. Switch it off briefly and back on if I'm right."* The
+   table shows `HAIR DRYER? A`.
+3. Switch it off for a few seconds and back on: that's the yes. The flick is shorter than
+   the detector's 10 s settle time, so the teacher watches the raw phase readings for a dip
+   of the step's size (±25 %, at least 60 W) that recovers within 20 s.
+4. Virta writes `profiles/hair_dryer.json` from the measured steps (tolerance = max(35 W,
+   15 %, 1.5× the spread of the three measured steps)), renames the running load, and says
+   *"Noted. The hair dryer it is - I shall know it next time."* The next switch-on is
+   matched by name.
+
+No gesture within 3 minutes: nothing is learned, and the load goes to the labelling
+worklist as before. A guess costs one call per new load, through the same caps and kill
+switch, and the same size on the same phase isn't asked about twice in 10 minutes.
+Steps under 120 W aren't detected at all, so use something bigger (hair dryer, vacuum,
+heater, iron) on a circuit the 3EM measures.
 
 ## Acting through Home Assistant (`virta/actions.py`)
 
@@ -548,6 +591,8 @@ flagged unreliable**, because the charger's load control can absorb other loads.
 - `virta/prices.py` — the real Nordpool price as a step function; exact costing.
 - `virta/actions.py` — voice, status lamp, light control with announce-then-act.
 - `virta/demo.py` — replays `samples/` through the live pipeline.
+- `virta/story.py` — the house's story for the butler: today vs yesterday, recent days, weather.
+- `virta/mirror.py` — copies the Pi's console state to the PC, for screenshots.
 - `samples/` — one published real day (time-shifted) for the demo.
 - `FEEDBACK.md` — what building on Token Factory + Nemotron taught us.
 - `virta/fsutil.py` — atomic writes that retry through a briefly locked file (Dropbox on the dev PC).

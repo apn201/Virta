@@ -461,6 +461,9 @@ def run(*, use_llm: bool, verbose: bool = True, gate: CloudCallGate | None = Non
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):  # a model may write "≈" or "–"; a cp1252 console must not crash the loop
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--no-llm", action="store_true", help="skip the Nemotron call")
     parser.add_argument("--refresh", action="store_true", help="re-run the detector over cached history first")

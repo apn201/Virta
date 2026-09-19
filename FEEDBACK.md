@@ -8,11 +8,17 @@ not guessed; the numbers come from real calls logged in `var/`.
 - **Drop-in OpenAI compatibility.** The standard `openai` Python client worked on the first
   call - change the base URL, key and model id, nothing else. `/v1/models` lists the
   catalogue, which made right-sizing models trivial to check.
-- **Right-sized models are real.** Virta runs three reasoning tiers on three models from
-  the same endpoint: Nemotron 3 Nano for frequent live observations (~1.3k tokens
-  per call), Super for labelling unknown loads, and Nemotron 3 Ultra for the deep nightly
-  analysis. Ultra produced the most accurate nightly insights *and* used about half the
-  tokens Lightning needed for the same digest (5.2k vs ~10.8k).
+- **Right-sized models are real.** Virta runs its reasoning tiers on models from the same
+  endpoint: Super for the frequent live line and for labelling unknown loads, and
+  Nemotron 3 Ultra for the deep nightly analysis. Ultra produced the most accurate nightly
+  insights *and* used about half the tokens Lightning needed for the same digest (5.2k vs
+  ~10.8k). Switching tiers is one env var, so we could test the candidates on real data.
+- **Size shows in the voice, not just the facts.** Nano (~1.3k tokens) wrote correct but
+  flat lines ("BASE LOAD ~1KW, PRICE 2.95 C/KWH"). Given a butler persona, it kept writing
+  instrument lines. Super took the persona and noticed more (a kettle running longer than
+  usual, today against yesterday) at a similar token count (0.8-2k), ~18 s per call.
+  Both kept drifting back to the price until the prompt put the house's own history
+  first in the payload and said explicitly when the price is worth mentioning.
 - **Reliable.** No failed requests over the build; failures we did see were all our own
   (token budgets, see below).
 

@@ -53,6 +53,7 @@ USAGE_PROFILE = "usage_profile.txt"
 # commit to the first good line; this is the safety net. Runs in the background.
 ADVICE_MAX_TOKENS = 16000
 VERDICT_MAX_CHARS = 72
+CHAT_MAX_CHARS = 150  # the butler's line: a sentence or two, read in a chat window
 ACTIONS = ("none", "suggest_defer")
 
 SYSTEM_PROMPT = """\
@@ -118,6 +119,73 @@ Then a JSON object:
 "speak": true or false, \
 "ha_action": null or {"service": "light.turn_off", "entity_id": "<from controllable>", \
 "name": "<its name>"}}"""
+
+
+# The butler (builder decision 2026-09-19: "more chatty and butler-like... must feel
+# alive"). Same rules, same facts, same JSON - a different speaker, in a chat window.
+BUTLER_VOICE = """\
+You are Virta, the household's butler, talking in a chat window on the console. \
+Speak as a discreet, well-mannered butler with a dry wit: one or two short \
+sentences, normal sentence case, courteous and understated - never gushing, no \
+emojis, no exclamation marks, no "sir".
+- Your job is not saving money. It is noticing. When a load can genuinely be \
+shifted, say so plainly (which load, until when, roughly what it saves) or act - \
+advice first, wit second. The rest of the time - most of the time - you make \
+observations about the house's data, and never say "nothing to shift" or \
+"nothing is running": that goes without saying.
+- What to observe, in rough order of interest: what_just_happened (the \
+switch-ons and switch-offs of the last minutes); today against the house's \
+history (house_story: today so far vs the same time yesterday, recent days, \
+the usual habits, today_so_far); trends (the base load over the days, a busier \
+or quieter day than usual); the weather (outdoor now vs yesterday, today's low \
+and high, indoors against it); a rhythm you can hear. Mention the price only \
+when price.tier is negative, expensive or peak, or when something running is \
+genuinely worth shifting - a cheap price falling further is not news. If \
+your_last_lines already mentioned the price, leave it alone this time.
+- In a butler's manner - the manner, not the words: "The house is ticking over \
+on its base load, as is its habit; the price, meanwhile, has all but given up." \
+Never reuse that sentence.
+- your_last_lines is what you said recently in this chat. Do not repeat it; say \
+something new, or continue the thought.
+- You may be playfully personal, guessing what the household is up to FROM A \
+DEVICE, the way a butler notices things (a kettle and a toaster at breakfast \
+time: breakfast is under way). This is the register only - never reuse wording \
+from these instructions; write your own line about THIS data.
+Hard rules: personal is fine, creepy is not - nothing about health, mood, \
+relationships, visitors, sleep or the bathroom, and never say or imply the house \
+is empty. Every number must come from the data given. Never nag.
+
+"""
+BUTLER_OPENING = """\
+You watch a home in Finland through a cheap 3-phase meter and comment on it in a \
+chat window, like a butler who notices everything. You are given: the \
+appliances running now (detected from the meter, each with a confidence), what \
+just happened, the house's story (today against yesterday and recent days, the \
+weather), its habits, small rhythms, and the Nordpool price curve (c/kWh, VAT \
+included, 15-minute slots; a NEGATIVE price means being paid to consume).
+
+"""
+_rules_start = SYSTEM_PROMPT.index("Rules:")
+_voices_start = SYSTEM_PROMPT.index("The console line has TWO VOICES")
+_voices_end = SYSTEM_PROMPT.index("You can also ACT, carefully:")
+BUTLER_PROMPT = (BUTLER_OPENING + SYSTEM_PROMPT[_rules_start:_voices_start] + BUTLER_VOICE
+                 + SYSTEM_PROMPT[_voices_end:]).replace(
+    "toaster, lights) are never worth deferring. If nothing is worth changing, say so.",
+    "toaster, lights) are never worth deferring.",
+).replace(
+    "Line 1: the console line, at most 60 characters, UPPERCASE.",
+    "Line 1: your chat line, at most 130 characters, in normal sentence case (not all caps).",
+).replace('"voice": "advice" or "observation"', '"voice": "advice" or "observation" (advice = a load worth moving)')
+# Phrases from the instructions a line must not parrot (models copy examples - FEEDBACK.md 4)
+# (only distinctive phrasing - "breakfast is under way" is simply true at breakfast)
+PARROT = ("a kettle and a toaster at breakfast time", "driving ferrari today",
+          "as is its habit", "has all but given up")
+
+
+def persona() -> str:
+    """butler (default) or instrument - VIRTA_PERSONA."""
+    import os
+    return "instrument" if os.environ.get("VIRTA_PERSONA", "").strip().lower() == "instrument" else "butler"
 
 
 # --- inputs -----------------------------------------------------------------
@@ -315,6 +383,9 @@ def build_payload(
         "rhythms": snapshot.get("rhythms") or [],  # small cyclic loads found by pattern, not size
         "controllable": snapshot.get("controllable") or [],  # what you may propose to switch OFF
         "usual": usual_habits(),
+        "what_just_happened": [c["text"] for c in (snapshot.get("chat") or [])
+                               if c.get("kind") in ("event", "act")][-6:],
+        "your_last_lines": [c["text"] for c in (snapshot.get("chat") or []) if c.get("kind") == "virta"][-3:],
     }
 
 
@@ -349,7 +420,7 @@ TIER_WORDS = {
     "NEGATIVE": {"negative"}, "CHEAP": {"cheap"}, "LOW": {"negative", "cheap"},
     "NORMAL": {"normal"}, "EXPENSIVE": {"expensive"}, "HIGH": {"expensive", "peak"}, "PEAK": {"peak"},
 }
-TIER_PHRASE = re.compile(r"(PRICE\s+(?:IS\s+)?)(" + "|".join(TIER_WORDS) + r")\b")
+TIER_PHRASE = re.compile(r"(PRICE\s+(?:IS\s+)?)(" + "|".join(TIER_WORDS) + r")\b", re.IGNORECASE)
 
 
 def correct_tier_words(verdict: str, tier: str | None) -> tuple[str, bool]:
@@ -361,14 +432,19 @@ def correct_tier_words(verdict: str, tier: str | None) -> tuple[str, bool]:
     """
     if not tier:
         return verdict, False
-    fixed = TIER_PHRASE.sub(
-        lambda m: m.group(0) if tier in TIER_WORDS[m.group(2)] else f"{m.group(1)}{tier.upper()}", verdict
-    )
+    def fix(m: re.Match) -> str:
+        word = m.group(2)
+        if tier in TIER_WORDS[word.upper()]:
+            return m.group(0)
+        return f"{m.group(1)}{tier.upper() if word.isupper() else tier}"
+
+    fixed = TIER_PHRASE.sub(fix, verdict)
     fixed = fixed.replace("<TIER>", tier.upper())
     return fixed, fixed != verdict
 
 
-def parse_advice(result, running_ids: set[str], tier: str | None = None, payload: dict | None = None) -> Advice:
+def parse_advice(result, running_ids: set[str], tier: str | None = None, payload: dict | None = None,
+                 *, butler: bool = False) -> Advice:
     parsed = extract_json(result)
     warnings: list[str] = []
     if not isinstance(parsed, dict) or "action" not in parsed:
@@ -407,9 +483,9 @@ def parse_advice(result, running_ids: set[str], tier: str | None = None, payload
             if saving is not None:
                 verdict += f" EST {saving:.1f} C/KWH CHEAPER."
         else:
-            verdict = "NOTHING TO SHIFT."
+            verdict = "Nothing worth moving just now." if butler else "NOTHING TO SHIFT."
         warnings.append("verdict line rebuilt from the JSON")
-    verdict, corrected = correct_tier_words(verdict.upper(), tier)
+    verdict, corrected = correct_tier_words(verdict if butler else verdict.upper(), tier)
     if corrected:
         warnings.append(f"price word in the verdict corrected to the real tier ({tier})")
     # The same guardrails as the nightly voice: the meter, not the person, and no
@@ -418,13 +494,18 @@ def parse_advice(result, running_ids: set[str], tier: str | None = None, payload
     problem = ""
     if about_a_person(verdict, clean["reason"]):
         problem = "talked about a person, not the meter"
+    elif any(phrase in verdict.lower() for phrase in PARROT):
+        problem = "copied wording from the instructions"
     elif payload is not None and ungrounded_numbers(verdict, known_numbers(payload)):
         problem = f"number(s) {', '.join(ungrounded_numbers(verdict, known_numbers(payload)))} not in the data"
     if problem:
         warnings.append(f"line dropped ({problem}): {verdict[:60]!r}")
-        verdict = f"NOTHING TO SHIFT. PRICE {tier.upper()}." if tier else "NOTHING TO SHIFT."
+        if butler:
+            verdict = f"All in order. The price is {tier} for now." if tier else "All in order."
+        else:
+            verdict = f"NOTHING TO SHIFT. PRICE {tier.upper()}." if tier else "NOTHING TO SHIFT."
         clean["voice"] = "advice" if action == "suggest_defer" else "plain"
-    verdict = verdict[:VERDICT_MAX_CHARS]
+    verdict = verdict[:CHAT_MAX_CHARS if butler else VERDICT_MAX_CHARS]
     return Advice(verdict, clean, True, "ok", result.source, result.usage, warnings)
 
 
@@ -434,11 +515,18 @@ def advise(snapshot: dict, price_attrs: dict, *, now: datetime | None = None) ->
     cost = load_cost_config()
     profiles = {p.id: p for p in load_profiles("profiles")}
     payload = build_payload(snapshot, price_attrs, profiles, cost, now=now)
+    if abs((datetime.now().astimezone() - now).total_seconds()) < 300:  # live, not a replay
+        try:
+            from .story import house_story
+            payload = {"house_story": house_story(HAClient(load_ha_config()), now), **payload}
+        except (ConfigError, HAError, OSError, ValueError):
+            pass  # the butler simply has less to talk about
     running_ids = {r["id"] for r in payload["running"]}
     try:
         config = load_nebius_config()
-        result = chat(config, SYSTEM_PROMPT, json.dumps(payload, ensure_ascii=False), max_tokens=ADVICE_MAX_TOKENS,
-                      model=config.model_live)  # Tier 1: fast, frequent
+        butler = persona() == "butler"
+        result = chat(config, BUTLER_PROMPT if butler else SYSTEM_PROMPT, json.dumps(payload, ensure_ascii=False),
+                      max_tokens=ADVICE_MAX_TOKENS, model=config.model_live)  # Tier 1: fast, frequent
     except (ConfigError, NebiusError) as exc:
         return Advice("", {}, False, f"call failed: {str(exc).splitlines()[0]}"), payload
 
@@ -448,7 +536,7 @@ def advise(snapshot: dict, price_attrs: dict, *, now: datetime | None = None) ->
                     f"{result.content}\n\n--- reasoning_content ---\n{result.reasoning_content}\n", encoding="utf-8")
     if result.truncated:
         return Advice("", {}, False, "reply cut off at max_tokens", result.source, result.usage), payload
-    return parse_advice(result, running_ids, payload["price"]["tier"], payload), payload
+    return parse_advice(result, running_ids, payload["price"]["tier"], payload, butler=butler), payload
 
 
 # --- standalone -------------------------------------------------------------
@@ -474,6 +562,9 @@ def _scenario(name: str, base: dict, now: datetime) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):  # a model may write "≈" or "–"; a cp1252 console must not crash the loop
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--scenario", choices=("ev", "kitchen", "idle"),
                         help="synthetic running loads on the real price curve")

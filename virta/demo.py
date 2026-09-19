@@ -37,7 +37,7 @@ from .detector import LoadState, StackingDetector
 from .ev_signature import rough_baseline
 from .fsutil import atomic_write_text
 from .history import _finish, _to_float, _to_local, align_phases
-from .live import session_summary
+from .live import CHAT_MAX, chat_line_for, session_summary
 from .prices import PriceCurve
 from .profiles import load_profiles
 from .rhythm import strong_rhythms
@@ -77,6 +77,9 @@ def nordpool_attrs(prices: list[tuple[datetime, float]]) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):  # a model may write "≈" or "–"; a cp1252 console must not crash the loop
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--from", dest="start", default="07:20", help="sample clock to start at (HH:MM)")
     parser.add_argument("--speed", type=float, default=10.0, help="sample minutes per real minute")
@@ -136,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
           f"at {args.speed:g}x  - Nemotron {'on' if use_llm else 'off'}.  Ctrl+C to stop.")
     print(f"  run the console in another terminal:  python -m virta.console")
     recent: list = []
+    chat: list = []  # the same conversation window as the live loop
     rhythms: list = []
     rhythm_due = sample_start
     try:
@@ -148,11 +152,16 @@ def main(argv: list[str] | None = None) -> int:
                 for event in detector.update(frame):
                     print(f"  sample {event.when:%H:%M:%S}  {event.describe()[27:110]}")
                     ended = before.get(event.load_key)
+                    summary = None
                     if ended and event.kind in ("OFF", "OFF_RECONCILED", "BASE_ON", "BASE_SHIFT"):
                         summary = session_summary(ended, event.when, curve, finished=True)
                         summary["since"], summary["ended"] = T(ended.since).isoformat(), T(event.when).isoformat()
                         recent.insert(0, summary)
                         del recent[4:]
+                    line = chat_line_for(event, summary)
+                    if line:
+                        chat.append({"at": T(event.when).isoformat(timespec="seconds"), "kind": "event", "text": line})
+                        del chat[:-CHAT_MAX]
                     before = {l.key: l for l in detector.active}
                 floor = tracker.observe(detector.calibration_frame(frame), stack_empty=detector.calibration_ready)
                 if floor:
@@ -205,6 +214,7 @@ def main(argv: list[str] | None = None) -> int:
                 "context": {"part_of_day": f"REPLAY {sample_now:%a %H:%M}, {'dark' if dark else 'light'}".upper(),
                             "is_dark": dark},
                 "price": {"c_kwh": price_now, "tier": str(tier) if tier else None, "tomorrow_valid": False},
+                "chat": list(chat),
             }
 
             # Tier 1 on Nemotron, on situation change - same gate, same advisor
@@ -216,6 +226,10 @@ def main(argv: list[str] | None = None) -> int:
                     verdict = advice.verdict
                     last_advice = {**advice.to_json(), "at": real_now.isoformat(),
                                    "tokens": advice.usage.get("completion_tokens")}
+                    chat.append({"at": real_now.isoformat(timespec="seconds"), "kind": "virta", "text": verdict,
+                                 "why": str(advice.action.get("reason", "")),
+                                 "tokens": advice.usage.get("completion_tokens")})
+                    del chat[:-CHAT_MAX]
                     print(f"  NEMOTRON >> {verdict}")
             if use_llm and in_flight is None and price_now is not None:
                 ids = sorted(s.load.load_id if s.load.state is LoadState.MATCHED else f"unknown_{s.load.phases}"
@@ -228,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
                     in_flight = executor.submit(advise, json.loads(json.dumps(advisor_view, default=str)), attrs,
                                                 now=sample_now)
             snapshot.update({
-                "verdict": verdict, "advice": last_advice,
+                "verdict": verdict, "advice": last_advice, "chat": list(chat),
                 "reasoning": {"in_flight": in_flight is not None, "since": real_now.isoformat() if in_flight else None,
                               "why": "situation changed" if in_flight else None},
                 "gate": {"status": gate.status() if gate else "calls: 0/0 this hour | 0/0 today | 0 lifetime"},

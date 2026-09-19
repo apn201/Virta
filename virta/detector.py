@@ -61,6 +61,7 @@ EV_BALANCE_MIN_RATIO = 0.6
 # (a halogen measured +230 on, -194 off on 17.09).
 OFF_TOLERANCE_FRACTION = 0.25
 OFF_TOLERANCE_MIN_W = 80.0
+AUDIT_STEADY = timedelta(minutes=10)  # quiet this long before the books are checked
 PAIR_CONFIDENCE = 0.85  # two loads read from one step: a little less sure than one clean match
 EV_RELIABILITY_FACTOR = 0.5  # other detections' confidence while the EV charges
 EV_OFF_FRACTION = 0.5  # all three phases dropping this share of the EV draw = EV off
@@ -209,6 +210,7 @@ class StackingDetector:
         self._keys = count(1)
         self._last: Frame | None = None
         self._ev_off_leftovers: list[Event] = []
+        self._steady_since: dict[str, datetime | None] = {p: None for p in PHASES}
 
     # --- accounting ---------------------------------------------------------
     def _base(self, phase: str) -> float:
@@ -280,6 +282,7 @@ class StackingDetector:
         """Feed one reading; returns the events it completed."""
         self._last = frame
         new_events: list[Event] = self._retire_long_off(frame.when)
+        new_events.extend(self._audit(frame))
 
         matured: dict[str, float] = {}
         for phase in PHASES:
@@ -387,6 +390,72 @@ class StackingDetector:
         if best is None:
             return self._add(when, ups, None, 0.0, "balanced 3-phase step matching no profile", unreliable=False)
         return self._add(when, ups, best, best_conf, why, unreliable=False)
+
+    def adopt(self, when: datetime, load_key: int, profile: Profile, reason: str) -> Event | None:
+        """A running unknown load has been identified (taught by gesture): it takes the
+        new profile's name from now on, and the profile joins the ones matched against."""
+        if profile.matchable and all(p.id != profile.id for p in self.profiles):
+            self.profiles.append(profile)
+        load = next((l for l in self.active if l.key == load_key), None)
+        if load is None:
+            return None
+        load.load_id, load.display_name, load.profile = profile.id, profile.display_name, profile
+        load.state, load.confidence, load.reason = LoadState.MATCHED, 0.95, reason
+        event = self._event(when, "RELABEL", load, dict(load.draw), reason)
+        self.events.append(event)
+        return event
+
+    def _audit(self, frame: Frame) -> list[Event]:
+        """The books must add up. When a phase has sat steady for AUDIT_STEADY and its
+        stack is self-contradictory - a load above the base next to a base part
+        switched off, or a drift bigger than a step - the stack on that phase is
+        rebuilt from what the meter says against the measured base load. Matched
+        loads that still fit are kept; the rest is one honest unknown (or base part
+        off), or nothing. Phantoms can't outlive a quiet ten minutes."""
+        events: list[Event] = []
+        if self.ev is not None:
+            return events  # load control moves everything while charging; not a quiet time
+        for phase in PHASES:
+            value = {"A": frame.a, "B": frame.b, "C": frame.c}[phase]
+            r = None if value is None else value - self.accounted(phase)
+            if r is None or abs(r) >= STEP_MIN_W / 2 or self._pending[phase] is not None:
+                self._steady_since[phase] = None
+                continue
+            since = self._steady_since[phase] = self._steady_since[phase] or frame.when
+            if frame.when - since < AUDIT_STEADY:
+                continue
+            here = [l for l in self.active if l.draw.get(phase) and set(l.draw) <= {phase}]
+            mixed = any(l.draw[phase] > 0 for l in here) and any(l.draw[phase] < 0 for l in here)
+            # a big drift is only suspect when it hides loads on the stack; after a
+            # BASE_SHIFT it IS the base load's lasting drop, until the next recalibration
+            if not mixed and (abs(self.drift[phase]) < STEP_MIN_W or not here):
+                continue
+            excess = value - self._base(phase)  # what is really above (or below) the base now
+            keep: list[ActiveLoad] = []
+            for load in sorted((l for l in here if l.profile is not None and l.draw[phase] > 0),
+                               key=lambda l: -l.confidence):
+                if sum(k.draw[phase] for k in keep) + load.draw[phase] <= excess + OFF_TOLERANCE_MIN_W:
+                    keep.append(load)
+            for load in here:
+                if load not in keep:
+                    events.append(self._remove(frame.when, load, {phase: -load.draw[phase]},
+                                               f"books rebuilt: {phase} steady at {value:.0f} W for "
+                                               f"{AUDIT_STEADY.total_seconds() / 60:.0f} min did not add up",
+                                               kind="OFF_RECONCILED"))
+            self.drift[phase] = 0.0
+            rest = excess - sum(k.draw[phase] for k in keep)
+            if rest >= STEP_MIN_W:
+                events.append(self._add(frame.when, {phase: rest}, None, 0.0,
+                                        f"+{rest:.0f} W on {phase} above the base load after the books were rebuilt",
+                                        unreliable=False))
+            elif rest <= -STEP_MIN_W:
+                events.append(self._add(frame.when, {phase: rest}, None, 0.0,
+                                        f"{rest:.0f} W on {phase} below the base load after the books were rebuilt",
+                                        unreliable=False, kind="BASE_OFF"))
+            else:
+                self.drift[phase] = rest  # within noise: the base load's own wander
+            self._steady_since[phase] = None
+        return events
 
     def _retire_long_off(self, now: datetime) -> list[Event]:
         """A base part off for over BASE_PART_MAX_OFF is a lasting change, not a pause.

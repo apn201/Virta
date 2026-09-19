@@ -22,7 +22,7 @@ DEFAULT_TIMEOUT_S = 60.0
 # Right-sized models per reasoning tier (the track text: "Reach for Nemotron 3 Ultra
 # when you need serious reasoning, and let Nano or Super handle the fast, everyday
 # calls"). NEBIUS_MODEL_ID stays the fallback for anything unset.
-DEFAULT_MODEL_LIVE = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"  # Tier 1: frequent, fast
+DEFAULT_MODEL_LIVE = "nvidia/nemotron-3-super-120b-a12b"  # Tier 1: the butler; Nano was flatter (see FEEDBACK.md)
 DEFAULT_MODEL_LABELS = "nvidia/nemotron-3-super-120b-a12b"  # discovery guesses
 DEFAULT_MODEL_NIGHTLY = "nvidia/Nemotron-3-Ultra-550b-a55b"  # Tier 2: once a night, deepest
 DEFAULT_MAX_TOKENS = 2048  # reasoning tokens come out of this budget too
@@ -42,7 +42,7 @@ DEFAULT_DEBOUNCE_S = 8.0  # spec 8: TUNABLE ~5-10s settle window
 # but the daily cap stays so credits survive until the demo.
 DEFAULT_MAX_CALLS_PER_HOUR = 30
 DEFAULT_MAX_CALLS_PER_DAY = 250
-DEFAULT_HEARTBEAT_MINUTES = 30  # a fresh observation twice an hour even when nothing changes
+DEFAULT_HEARTBEAT_MINUTES = 15  # the butler speaks up every quarter hour even when nothing changes
 # --demo: reasoning is the show. More often, same daily ceiling.
 DEMO_MAX_CALLS_PER_HOUR = 60
 DEMO_HEARTBEAT_MINUTES = 5

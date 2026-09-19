@@ -107,6 +107,8 @@ class ConsoleRenderer:
         self.own_trace: list = []  # built from successive readings if state.json carries no trace
         self._last_when = None
         self._text_cache: dict = {}
+        self._chat_seen: dict = {}  # line key -> when this console first showed it
+        self._chat_primed = False  # lines present at start are not typed out again
 
     # --- layout ---------------------------------------------------------------
     def resize(self, size: tuple[int, int]) -> None:
@@ -122,13 +124,14 @@ class ConsoleRenderer:
         self.f_small_bold = pg.font.SysFont(face, max(13, int(15 * self.s)), bold=True)
         self.f_comment = pg.font.SysFont(face, max(14, int(17 * self.s)))
         self.f_big = pg.font.SysFont(face, max(28, int(34 * self.s)), bold=True)
+        self.f_chat = pg.font.SysFont(face, max(17, int(21 * self.s)), bold=True)  # Virta's newest line
         # floors: below the 1280x720 design size (the Pi's 7" 1024x600) text keeps a
         # readable pixel size instead of shrinking with the layout
         self._text_cache = {}
         m = g = int(self.bezel * self.s)  # the bezel covers these margins
         # Nemotron across the top, read first (spec 0: lead with the reasoning);
         # the sensing below it - the trace + disc, and the readings + detections
-        top_h = int((self.h - 2 * m - g) * 0.40)
+        top_h = int((self.h - 2 * m - g) * 0.46)  # the conversation needs room to scroll
         bottom_y = m + top_h + g
         bottom_h = self.h - bottom_y - m
         left_w = int((self.w - 2 * m - g) * 0.60)
@@ -585,27 +588,15 @@ class ConsoleRenderer:
                              name.centery, "midright")
             pg.draw.circle(surface, rgb, (text.x - int(9 * s), name.centery), max(3, int(5 * s)))
 
-        # left: the live verdict (instrument voice) + WHY
-        split = rect.x + int(rect.w * 0.60)
+        # left: the conversation - what happened, what Virta said, what it did.
+        # Newest at the bottom; older lines fade and scroll out of the top.
+        split = rect.x + int(rect.w * 0.62)
         width = split - x - pad
-        y = rect.y + int(34 * s)
-        verdict = state.get("verdict") or ""
-        lines = self.wrap(self.f_verdict_big, verdict, width) if verdict else ["AWAITING FIRST VERDICT"]
-        for line in lines[:2]:
-            self.blit(surface, self.f_verdict_big, line, GREEN if verdict else TEXT_DIM, x, y)
-            y += int(36 * s)
-        reason = str((advice.get("action") or {}).get("reason", "")).strip()
-        if reason:
-            y += int(4 * s)
-            w_label = self.blit(surface, self.f_tiny, "WHY", LABEL, x, y + int(3 * s))
-            for line in self.wrap(self.f_small, reason.upper(), width - w_label.w - int(10 * s))[:2]:
-                self.blit(surface, self.f_small, line, TEXT_DIM, w_label.right + int(10 * s), y)
-                y += int(19 * s)
+        top = rect.y + int(30 * s)
+        bottom = rect.bottom - int(52 * s) - int(14 * s)  # above LAST NIGHT
 
-        # ACT: a proposal waiting for a human (amber - the one alert on screen)
+        # ACT: a proposal waiting for a human (amber - the one alert on screen), pinned at the bottom
         proposal = state.get("proposal")
-        last = state.get("last_action") or {}
-        y += int(6 * s)
         if proposal:
             name = str(proposal.get("name", "")).upper()
             swap = f" -> {str(proposal.get('swap_name')).upper()} ON" if proposal.get("swap_name") else ""
@@ -614,11 +605,18 @@ class ConsoleRenderer:
                 msg = f"SWITCHING {name} OFF{swap} IN {left} S   [N] CANCEL"
             else:
                 msg = f"PROPOSED: TURN OFF {name}{swap}   [Y] YES   [N] NO"
-            self.blit(surface, self.f_small_bold, self.fit(self.f_small_bold, msg, width), AMBER, x, y)
-        elif last and now - _epoch(last.get("at")) < 180:
-            words = {"done": "DONE", "declined": "DECLINED", "expired": "EXPIRED", "failed": "FAILED"}
-            msg = f"{words.get(last.get('result'), '')}: {str(last.get('name') or '').upper()}"
-            self.blit(surface, self.f_small, msg, GREEN_MID, x, y)
+            r = self.blit(surface, self.f_small_bold, self.fit(self.f_small_bold, msg, width), AMBER, x,
+                          bottom, "bottomleft")
+            bottom = r.y - int(6 * s)
+
+        chat = list(state.get("chat") or [])
+        if not chat and state.get("verdict"):  # an older loop without a chat log
+            chat = [{"at": (state.get("advice") or {}).get("at") or "", "kind": "virta", "text": state["verdict"],
+                     "why": str(((state.get("advice") or {}).get("action") or {}).get("reason", ""))}]
+        if not chat:
+            self.blit(surface, self.f_verdict_big, "AWAITING FIRST WORD", TEXT_DIM, x, top)
+        else:
+            self.draw_chat(surface, chat, pg.Rect(x, top, width, bottom - top), now)
 
         # right: the evidence it reasoned over - the real price curve
         strip_x = split + pad
@@ -647,6 +645,74 @@ class ConsoleRenderer:
         else:
             self.blit(surface, self.f_comment, "NO INSIGHTS YET - THE NIGHTLY PASS RUNS AT 03:30", TEXT_DIM,
                       line_x, base_y)
+
+    def draw_chat(self, surface, chat: list[dict], area, now: float) -> None:
+        """A chat window, bottom-up. Virta's newest line is the big one and types
+        itself out; the house's events are small time-stamped lines between; what
+        Virta did is amber. New lines push the old ones up and out of the frame."""
+        pg, s = self.pg, self.s
+        first = self._chat_seen
+        for c in chat:  # when did THIS console first see each line (restarts don't re-type old ones)
+            first.setdefault(c.get("at", "") + c.get("text", "")[:20], now if self._chat_primed else 0.0)
+        self._chat_primed = True
+        newest_virta = max((i for i, c in enumerate(chat) if c.get("kind") == "virta"), default=-1)
+        clock_w = self.f_tiny.size("00:00  ")[0]
+        text_x, text_w = area.x + clock_w, area.w - clock_w
+
+        blocks = []  # (entry, font, lines, colour, height) newest last
+        for i, c in enumerate(chat):
+            kind, text = c.get("kind"), str(c.get("text", ""))
+            if kind == "virta" and i == newest_virta:
+                font, ink = self.f_chat, GREEN
+            elif kind == "virta":
+                font, ink = self.f_comment, GREEN_MID
+            elif kind == "act":
+                font, ink = self.f_small, AMBER if i >= len(chat) - 3 else AMBER_DIM
+            else:
+                font, ink = self.f_small, TEXT_DIM
+            lines = self.wrap(font, text, text_w)[:3]
+            height = len(lines) * font.get_linesize()
+            why = str(c.get("why") or "").strip() if i == newest_virta else ""
+            why_lines = self.wrap(self.f_tiny, "WHY  " + why.upper(), text_w)[:2] if why else []
+            height += len(why_lines) * self.f_tiny.get_linesize() + int(6 * s)
+            blocks.append((c, font, lines, ink, why_lines, height))
+
+        # the newest line slides in from below
+        key = chat[-1].get("at", "") + chat[-1].get("text", "")[:20]
+        age = now - first.get(key, 0.0)
+        slide = int(blocks[-1][5] * max(0.0, 1 - age / 0.45)) if blocks else 0
+
+        clip = surface.get_clip()
+        surface.set_clip(area)
+        y = area.bottom + slide
+        for depth, (c, font, lines, ink, why_lines, height) in enumerate(reversed(blocks)):
+            y -= height
+            if y + height < area.y:
+                break
+            fade = max(0.3, 1.0 - 0.13 * depth)  # older = dimmer, like ink drying
+            colour = tuple(int(PANEL[k] + (ink[k] - PANEL[k]) * fade) for k in range(3))
+            stamp = str(c.get("at", ""))[11:16]
+            self.blit(surface, self.f_tiny, stamp, LABEL, area.x, y + max(0, font.get_linesize() - self.f_tiny.get_linesize()) // 2)
+            seen = first.get(c.get("at", "") + c.get("text", "")[:20], 0.0)
+            reveal = int((now - seen) * 45) if c.get("kind") == "virta" else 10_000  # typewriter, 45 chars/s
+            ly = y
+            for line in lines:
+                shown = line[:max(0, reveal)]
+                reveal -= len(line) + 1
+                if shown:
+                    self.blit(surface, font, shown, colour, text_x, ly)
+                ly += font.get_linesize()
+            if why_lines and reveal > 0:
+                for line in why_lines:
+                    self.blit(surface, self.f_tiny, line, LABEL, text_x, ly)
+                    ly += self.f_tiny.get_linesize()
+        surface.set_clip(clip)
+        # a soft fade at the top edge, so lines scroll OUT rather than get cut
+        fade_h = int(18 * s)
+        veil = pg.Surface((area.w, fade_h), pg.SRCALPHA)
+        for k in range(fade_h):
+            veil.fill((*PANEL, int(255 * (1 - k / fade_h))), pg.Rect(0, k, area.w, 1))
+        surface.blit(veil, (area.x, area.y))
 
     def draw_price_strip(self, surface, strip, state: dict, now: float) -> None:
         """Today's real Nordpool slots (+ tomorrow once published), the current one lit."""
@@ -695,6 +761,8 @@ def row_name(load: dict) -> str:
         who = "BASE PART" if load.get("state") == "UNKNOWN" else str(load.get("name") or load.get("id", "")).upper()
         return f"{who} OFF {phases}".strip()
     if load.get("state") == "UNKNOWN":
+        if load.get("guess"):  # Nemotron's guess, waiting for the off-and-on gesture
+            return f"{str(load['guess']).upper()}? {phases}".strip()
         return f"UNKNOWN {phases}".strip()
     name = load.get("name") or load.get("id") or ""
     if not load.get("name") and load.get("label"):  # finished sessions carry the label

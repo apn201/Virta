@@ -556,6 +556,9 @@ def run_nightly(*, use_llm: bool = True, days: float = WINDOW_DAYS, gate: CloudC
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):  # a model may write "≈" or "–"; a cp1252 console must not crash the loop
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--no-llm", action="store_true", help="build the digest, no cloud calls")
     parser.add_argument("--no-discovery", action="store_true", help="skip the labelling pass")
