@@ -260,11 +260,10 @@ https://github.com/apn201/Virta#demo-replay-and-sample-data
 ## Video demo link
 
 ```
-PENDING — the only field that can't be written ahead of the shoot.
+https://youtu.be/raFAFtf1x2k
 ```
 
-Shot list is in `devpost/VIDEO-PLAN.md`. Upload unlisted to YouTube, paste the watch URL
-here, then open it in an incognito window to check the link actually works.
+Project page, once it's live: https://devpost.com/software/virta
 
 ---
 
@@ -573,12 +572,12 @@ Age of majority, and not an employee of the promotion entities. Both yours to ti
       (end of the Labelling section: "decide before the repo goes public whether it
       should be in it") and say they're published on purpose instead. An open question
       in a README reads as an oversight.
-- [ ] **Add a Token Factory line to the README.** The submission form asks the repo to
-      highlight "where Token Factory accelerated your workflow". `FEEDBACK.md` covers it,
-      but add one sentence near the top of the README linking there, so a judge reading
-      only the README sees it.
+- [x] **Token Factory line added to the README.** Line 13 now links FEEDBACK.md as
+      "where Token Factory sped the build up", which is what the form asks the repo to
+      highlight. The demo video and Devpost links sit on the same line.
 - [ ] Confirm `.env` is not in the repo and `.gitignore` still covers `data/`, `csv/`, `var/`.
 - [ ] Push the current work. Last commit is 0e4993f, 2026-09-19.
 - [ ] Repo public, MIT license file present, README setup steps verified on a clean clone.
-- [ ] Video uploaded, unlisted, link works in an incognito window.
+- [x] Video uploaded: https://youtu.be/raFAFtf1x2k — still open it once in an incognito
+      window. An accidentally-private link embeds as nothing on Devpost.
 - [ ] First gallery image cropped 3:2 — it is the thumbnail everywhere.

@@ -10,7 +10,10 @@ Virta doesn't compete with them. It concedes the sensing and puts the value in w
 **conclude** from a crude signal. NVIDIA **Nemotron** on **Nebius Token Factory** does
 that reasoning. Detection (NILM) is only the foundation it reasons over.
 
-Nebius x NVIDIA Global AI Hackathon, Physical AI track. Spec: `virta-spec.md`.
+Nebius x NVIDIA Global AI Hackathon, Physical AI track.
+**[Demo video](https://youtu.be/raFAFtf1x2k)** · [Devpost](https://devpost.com/software/virta) ·
+spec: `virta-spec.md`.
+Where Token Factory sped the build up, and what Nemotron taught us: [FEEDBACK.md](FEEDBACK.md).
 
 ## What it does - three tiers of reasoning (spec §6A)
 
@@ -116,7 +119,7 @@ Set three env vars (or copy `.env.example` to `.env` and fill it in — real env
 | `NEBIUS_BASE_URL` | no | `https://api.tokenfactory.nebius.com/v1/` |
 | `NEBIUS_TIMEOUT_S` | no | `60` |
 | `NEBIUS_MAX_TOKENS` | no | `2048` |
-| `NEBIUS_MODEL_LIVE` / `_LABELS` / `_NIGHTLY` | no | Nano / Super / Ultra (see above) |
+| `NEBIUS_MODEL_LIVE` / `_LABELS` / `_NIGHTLY` | no | Super / Super / Ultra (see above) |
 | `HA_URL`, `HA_TOKEN` | for everything past slice 2 | — |
 | `VIRTA_TTS_PLAYER`, `VIRTA_TTS_ENTITY`, `VIRTA_TTS_LANG` | to let Virta speak | off |
 | `VIRTA_LAMP`, `VIRTA_LAMP_BRIGHTNESS` | a status lamp | off |
@@ -294,8 +297,10 @@ model ran out mid-thought (`finish_reason: length`) and never produced its JSON,
 labelling call gets 12,000 and the client now reports truncation explicitly. The last
 raw reply is always kept in `var/last_llm_reply.txt` for debugging.
 
-`labels/` describes household routines (what runs when). It's useful demo material, but
-decide before the repo goes public whether it should be in it.
+`labels/` and `profiles/` are published on purpose, as example data: the real worklist
+with its clusters and answers, and the device profiles measured off this house. That is
+what a working install looks like after a few days. The power stream they were derived
+from stays here.
 
 ## Live loop (slice 6)
 
