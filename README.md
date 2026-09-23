@@ -2,13 +2,15 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**A cheap meter and a reasoning model: cheap sensor, expensive brain.**
+One Shelly 3EM on the main supply, about 60 euros, and a Raspberry Pi 3 that was already
+in a drawer. That is the whole install. No smart plugs, no per-circuit clamps, nothing
+attached to any appliance.
 
-Virta turns one ~50 EUR Shelly 3EM on the main supply into an energy advisor that
-*understands* the house. Better sensors exist and so do better load disaggregators;
-Virta doesn't compete with them. It concedes the sensing and puts the value in what you
-**conclude** from a crude signal. NVIDIA **Nemotron** on **Nebius Token Factory** does
-that reasoning. Detection (NILM) is only the foundation it reasons over.
+The meter sees one number, the whole house. A step detector works out what is inside it,
+which was the easy part. The hard part is knowing what any of it means, and that runs on
+NVIDIA Nemotron through Nebius Token Factory. Better sensors exist and so do better load
+disaggregators. Virta does not compete with them. It concedes the sensing and puts the
+work into what you can conclude from a crude signal.
 
 Nebius x NVIDIA Global AI Hackathon, Physical AI track.
 **[Demo video](https://youtu.be/raFAFtf1x2k)** · [Devpost](https://devpost.com/software/virta) ·
@@ -34,9 +36,9 @@ NIGHTLY  1532W PULSED LOAD DETECTED 10 TIMES, EVENING-BIASED
 DISCOVER C-440W-36m: +443 W on C, 36 min, mornings + evenings -> "infrared heat lamp (50%)"?
 ```
 
-A detector knows what is on now. It has no memory and no idea of "usual", so it can
-never say that the always-on base load is three quarters of the bill, or that a
-charge would have cost a quarter as much 5 hours earlier. That sentence is the product.
+A detector knows what is on now. It has no memory and no idea what is usual, so it cannot
+say that the always-on base load is three quarters of the bill, or that a charge would
+have cost a quarter as much five hours earlier. Nemotron says those.
 
 **Where Nemotron is used** (all through Nebius Token Factory, `virta/nebius_client.py`):
 live advice (`virta/advisor.py`), nightly insights (`virta/nightly.py`), and load
@@ -44,24 +46,24 @@ discovery / labelling (`virta/labeller.py`).
 
 ## Honest by construction
 
-- **Every price is real.** Each run is costed slot by slot at the Nordpool price in
+- Every price is real. Each run is costed slot by slot at the Nordpool price in
   force while it ran; "could have cost" uses the cheapest real window of the same length
   that day. Only per-month figures are estimates, and they're labelled as such.
-- **Every number on a console line is checked** against the digest the model was given;
+- Every number on a console line is checked against the digest the model was given;
   a line with a number that isn't in it is dropped.
-- **Personal, never creepy.** Playful guesses anchored in a device are welcome ("EV AT
+- Personal, never creepy. Playful guesses anchored in a device are welcome ("EV AT
   FULL TILT. DRIVING FERRARI TODAY?"). Lines about health, mood, relationships, visitors,
   sleep or the bathroom, or saying the house is empty, are dropped in code
   (`virta/guardrails.py`) - not just discouraged in the prompt.
-- **Propose, then confirm.** Nemotron's guesses about unknown loads are hypotheses; nothing
+- Propose, then confirm. Nemotron's guesses about unknown loads are hypotheses; nothing
   becomes a profile until you name it (`labels/worklist.md`). Virta switches only the
   lights you list in `VIRTA_CONTROL`, announces it first, and gives you a grace period to
   cancel. It never touches the EV and never turns anything on except a configured
   cheaper light. HA automations are never edited - Virta only calls services.
-- **Private by design.** Raw power never leaves the house. Nemotron sees abstractions only:
+- Private by design. Raw power never leaves the house. Nemotron sees abstractions only:
   running loads, the price curve, a compact nightly digest (`var/digest.json` - always
   inspectable).
-- **Local memory beyond HA's 14 days.** Power and price history is archived daily into
+- Local memory beyond HA's 14 days. Power and price history is archived daily into
   `data/archive/` and kept forever, so patterns longer than the recorder window stay visible.
 
 ## Status
@@ -84,7 +86,9 @@ Build order per spec §12:
 9. **Acting through Home Assistant** - Virta speaks (TTS), shows its state on a lamp, and
    swaps an expensive light for a cheaper one when the price turns.
 
-Next: deploy to the Raspberry Pi 3. Optional after that: M5 panel.
+10. **On the Pi** - both services under systemd, console fullscreen on the HDMI screen.
+
+The M5 panel is still in the drawer.
 
 ## Three models, one endpoint
 
@@ -100,7 +104,7 @@ Ultra wrote better nightly insights than the smaller Lightning model *and* used 
 half the tokens (5.2k vs ~11k). The live line started on Nano (~1.3k tokens), but Nano
 wrote flat instrument lines and never took up the butler's voice; Super noticed more with
 a similar token count. Override any tier with `NEBIUS_MODEL_LIVE`,
-`NEBIUS_MODEL_LABELS`, `NEBIUS_MODEL_NIGHTLY`. What we learned about the platform is in
+`NEBIUS_MODEL_LABELS`, `NEBIUS_MODEL_NIGHTLY`. What I learned about the platform is in
 [FEEDBACK.md](FEEDBACK.md).
 
 ## Setup
@@ -110,7 +114,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Set three env vars (or copy `.env.example` to `.env` and fill it in — real env vars win over `.env`):
+Set three env vars (or copy `.env.example` to `.env` and fill it in; real env vars win over `.env`):
 
 | Variable | Required | Default |
 |---|---|---|
@@ -163,14 +167,14 @@ Exit codes: `0` ok · `1` call failed · `2` config problem · `3` model returne
 The local loop polls HA every ~15s for free; the cloud loop is gated. A cloud call needs
 all four layers to agree:
 
-1. **Kill switch** — `VIRTA_CLOUD_ENABLED=0` or the file at `CLOUD_KILL_SWITCH_PATH`.
+1. **Kill switch**: `VIRTA_CLOUD_ENABLED=0` or the file at `CLOUD_KILL_SWITCH_PATH`.
    The file form stops a running Pi without touching its environment.
-2. **Hard caps** — per-hour and per-day call counts plus an optional spend ceiling,
+2. **Hard caps**: per-hour and per-day call counts plus an optional spend ceiling,
    checked before every call and persisted to `var/cloud_usage.json`, so a restart
    cannot hand a crash-loop a fresh budget.
-3. **Trigger** — the situation hash `(active appliances, price tier, is_dark)` changed,
+3. **Trigger**: the situation hash `(active appliances, price tier, is_dark)` changed,
    or `tomorrow_valid` flipped true, or the heartbeat is due.
-4. **Debounce** — a settle window, so one real event produces one call.
+4. **Debounce**: a settle window, so one real event produces one call.
 
 Everything fails closed: any doubt serves the cached verdict instead of calling.
 
@@ -329,7 +333,7 @@ read mid-update. Price, darkness and temperatures refresh every 60 s.
 `virta/advisor.py`. Nemotron gets the situation as JSON: running loads with confidence,
 unusual and EV-unreliable flags; unknown loads by size and phase; the Nordpool curve in
 15-minute slots from now on (plus tomorrow once published); temperatures, darkness, the
-time; and `usage_profile.txt`. **Never the raw power stream.**
+time; and `usage_profile.txt`. Never the raw power stream.
 
 The edge does the price arithmetic first and hands it over as facts: cheapest 1 h and
 3 h windows, the curve's range, negative slots, and each load's running cost now. The
@@ -457,7 +461,7 @@ The kettle and toaster have been on for ten minutes, suggesting breakfast is und
 
 What he talks about is computed at the edge (`virta/story.py`): today's kWh vs the same
 clock time yesterday, recent whole days from the local archive, the outdoor/indoor
-temperatures over 24 h. The model gets conclusions, never the power stream.
+temperatures over 24 h.
 
 The console shows it as a **chat window**: the house's events (switch-ons and offs, with
 run time and cost) as small time-stamped lines, what Virta did in amber, and his lines in
@@ -606,21 +610,21 @@ flagged unreliable**, because the charger's load control can absorb other loads.
 - `profiles/` — device profiles (spec §7), hand-editable JSON, read by the detector and the prompt.
 - `virta/hello_nebius.py`, `virta/check_safeguards.py`, `virta/check_ha.py` — the runners.
 - `archive/openclaw-prompts/` — unused; HA is now read directly over REST.
-- `csv/`, `data/` — household power data. Git-ignored: raw power never leaves the house (spec §11).
+- `csv/`, `data/` — household power data, git-ignored (spec §11).
 - `archive/` — superseded documents.
 
 ## Slice 1 result (confirmed against the real endpoint)
 
 `nvidia/Nemotron-3_5-Lightning` returns **both** fields: the answer in `content`, the chain of
-thought in `reasoning_content`. So `content or reasoning_content` is the right precedence — the
+thought in `reasoning_content`. So `content or reasoning_content` is the right precedence. The
 fallback is insurance, not the normal path, for this model.
 
-It spent **165 completion tokens to answer "ONLINE"** — the thinking is billed and counted
+It spent **165 completion tokens to answer "ONLINE"**: the thinking is billed and counted
 against `max_tokens`. If `max_tokens` is set too low, the model can exhaust the budget mid-thought
 and return empty `content`, which surfaces as exit 3. Hence the `2048` default.
 
 Consequence for later slices: when parsing a JSON verdict, parse `content` first. Only fall back
-to `reasoning_content`, and when you do, expect prose around the JSON — extract the last JSON
+to `reasoning_content`, and when you do, expect prose around the JSON, so extract the last JSON
 block rather than trusting the whole string.
 
 ## The two Nemotron gotchas (spec §2, §6)

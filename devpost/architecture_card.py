@@ -113,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     cloud = pg.Rect(px(1250), top, px(600), px(250))
 
     box(meter, "SHELLY 3EM", [
-        ("~50 EUR", GREEN_MID),
+        ("~60 EUR", GREEN_MID),
         ("one clamp meter,", TEXT_DIM),
         ("on the main supply", TEXT_DIM),
         ("3 phases, one number", TEXT_DIM),

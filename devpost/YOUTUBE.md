@@ -19,7 +19,7 @@ Virta: whole-house NILM with one Shelly 3EM, a Raspberry Pi 3 and NVIDIA Nemotro
 Alternates:
 
 ```
-One 50 EUR meter and an old Raspberry Pi work out what every appliance in the house is doing
+One 60 EUR meter and an old Raspberry Pi work out what every appliance in the house is doing
 ```
 
 ```
@@ -36,7 +36,7 @@ and will be found by nobody.
 Roughly 157 characters show above the fold, so the first two lines carry it.
 
 ```
-One 50 EUR clamp meter on the main supply and a Raspberry Pi 3 from 2016. No smart plugs,
+One 60 EUR clamp meter on the main supply and a Raspberry Pi 3 from 2016. No smart plugs,
 nothing attached to any appliance. Virta works out what every load in the house is doing,
 what it costs at the real Nordpool price, and what the house does with its week.
 
@@ -60,7 +60,7 @@ CHAPTERS
 2:42 What it costs to run
 
 THE HARDWARE
-Shelly 3EM, about 50 EUR, three clamps on the mains
+Shelly 3EM, about 60 EUR, three clamps on the mains
 Raspberry Pi 3, already in a drawer
 An HDMI screen for the console
 Home Assistant on the LAN, read over REST
